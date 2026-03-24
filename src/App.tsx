@@ -557,15 +557,38 @@ const exportSTL = async () => {
     await new Promise(resolve => setTimeout(resolve, 100));
 
     const exporter = new STLExporter();
+
+    // HELPER: Flattens and un-indexes geometries to prevent STLExporter binary crashes
+    const createExportModel = (objects: THREE.Object3D[]) => {
+      const group = new THREE.Group();
+      objects.forEach(obj => {
+        obj.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            // Force geometry to be non-indexed so the exporter calculates byte sizes perfectly
+            const geom = child.geometry.index ? child.geometry.toNonIndexed() : child.geometry.clone();
+            geom.computeVertexNormals();
+            
+            const mesh = new THREE.Mesh(geom, child.material);
+            
+            // Bake the world position directly into the mesh
+            child.updateWorldMatrix(true, false);
+            mesh.applyMatrix4(child.matrixWorld);
+            
+            group.add(mesh);
+          }
+        });
+      });
+      return group;
+    };
     
     try {
       console.log('Starting Slicer-ready Export...');
       
       // --- 1. EXPORT SOLIDS (Base + Walls) ---
-      const solidsGroup = new THREE.Group();
+      const solidObjects: THREE.Object3D[] = [];
       
       if (baseMesh) {
-        solidsGroup.add(baseMesh.clone());
+        solidObjects.push(baseMesh);
       } else if (holes.length > 0 || walls.length > 0) {
         // Create default floor if no base is loaded
         let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
@@ -581,14 +604,14 @@ const exportSTL = async () => {
         const floorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
         const floorMesh = new THREE.Mesh(floorGeom, new THREE.MeshStandardMaterial());
         floorMesh.position.set((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
-        solidsGroup.add(floorMesh);
+        solidObjects.push(floorMesh);
       }
       
       if (wallsGroupRef.current) {
-        solidsGroup.add(wallsGroupRef.current.clone());
+        solidObjects.push(wallsGroupRef.current);
       }
       
-      solidsGroup.updateMatrixWorld(true);
+      const solidsGroup = createExportModel(solidObjects);
       const solidsResult = exporter.parse(solidsGroup, { binary: true });
       const solidsBlob = new Blob([solidsResult], { type: 'application/octet-stream' });
       const solidsUrl = URL.createObjectURL(solidsBlob);
@@ -604,16 +627,16 @@ const exportSTL = async () => {
         // Wait 500ms so the browser doesn't block the second consecutive download
         await new Promise(resolve => setTimeout(resolve, 500));
 
-        const holesGroup = new THREE.Group();
+        const holeObjects: THREE.Object3D[] = [];
         holes.forEach(hole => {
           // Create 200mm tall cylinders to ensure they cut all the way through
           const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
           const holeMesh = new THREE.Mesh(holeGeom, new THREE.MeshBasicMaterial());
           holeMesh.position.set(hole.x, 0, hole.y);
-          holesGroup.add(holeMesh);
+          holeObjects.push(holeMesh);
         });
         
-        holesGroup.updateMatrixWorld(true);
+        const holesGroup = createExportModel(holeObjects);
         const holesResult = exporter.parse(holesGroup, { binary: true });
         const holesBlob = new Blob([holesResult], { type: 'application/octet-stream' });
         const holesUrl = URL.createObjectURL(holesBlob);
