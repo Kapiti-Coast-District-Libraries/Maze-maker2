@@ -553,148 +553,95 @@ const exportSTL = async () => {
     if (!sceneRef.current) return;
     setIsExporting(true);
     
-    // Small delay to allow UI to update
     await new Promise(resolve => setTimeout(resolve, 100));
 
     const exporter = new STLExporter();
     const exportGroup = new THREE.Group();
     
-    // Helper to guarantee geometry is mathematically valid for CSG
-    const prepareGeometryForCSG = (geometry: THREE.BufferGeometry) => {
-      let geom = geometry.clone();
+    // ☢️ THE NUCLEAR OPTION: Strip EVERYTHING except pure X,Y,Z positions
+    const createCleanBrush = (originalGeom: THREE.BufferGeometry, position: THREE.Vector3, rotation?: THREE.Euler, scale?: THREE.Vector3) => {
+      const cleanGeom = new THREE.BufferGeometry();
       
-      // 1. Remove all attributes except position and normal to prevent mismatch crashes
-      const allowed = ['position', 'normal'];
-      Object.keys(geom.attributes).forEach(key => {
-        if (!allowed.includes(key)) {
-          geom.deleteAttribute(key);
-        }
-      });
+      // Only copy the raw position data, absolutely nothing else
+      cleanGeom.setAttribute('position', originalGeom.getAttribute('position').clone());
       
-      // 2. Merge vertices to fix floating point gaps (crucial for STLs)
-      geom = mergeVertices(geom, 1e-4);
-      geom.computeVertexNormals();
-      
-      // 3. CSG relies on indexed geometry. Guarantee it has an index.
-      if (!geom.index) {
-        const indexArray = new Uint32Array(geom.attributes.position.count);
-        for (let i = 0; i < indexArray.length; i++) {
-          indexArray[i] = i;
-        }
-        geom.setIndex(new THREE.BufferAttribute(indexArray, 1));
+      if (originalGeom.index) {
+        cleanGeom.setIndex(originalGeom.index.clone());
       }
       
-      return geom;
+      // Heal the geometry and generate a perfect index
+      const mergedGeom = mergeVertices(cleanGeom, 1e-4);
+      
+      const brush = new Brush(mergedGeom, new THREE.MeshStandardMaterial());
+      brush.position.copy(position);
+      if (rotation) brush.rotation.copy(rotation);
+      if (scale) brush.scale.copy(scale);
+      
+      brush.updateMatrixWorld();
+      return brush;
     };
 
     try {
-      console.log('Starting STL Export with CSG (three-bvh-csg)...');
+      console.log('Starting STL Export with Clean CSG...');
       let currentBrush: Brush | null = null;
       
-      // 1. Prepare the base mesh
+      // 1. Prepare Base Mesh
       if (baseMesh) {
-        console.log('Using loaded base mesh...');
-        const baseGeom = prepareGeometryForCSG(baseMesh.geometry);
-        
-        currentBrush = new Brush(baseGeom, new THREE.MeshStandardMaterial({ color: 0xaaaaaa }));
-        currentBrush.position.copy(baseMesh.position);
-        currentBrush.rotation.copy(baseMesh.rotation);
-        currentBrush.scale.copy(baseMesh.scale);
-        currentBrush.updateMatrixWorld();
+        currentBrush = createCleanBrush(baseMesh.geometry, baseMesh.position, baseMesh.rotation, baseMesh.scale);
       } else if (holes.length > 0 || walls.length > 0) {
-        console.log('Creating default floor...');
+        // Fallback Floor
         let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
-        
-        if (walls.length > 0) {
-          walls.forEach(w => {
-            minX = Math.min(minX, w.start.x, w.end.x);
-            maxX = Math.max(maxX, w.start.x, w.end.x);
-            minZ = Math.min(minZ, w.start.y, w.end.y);
-            maxZ = Math.max(maxZ, w.start.y, w.end.y);
-          });
-        }
-        
+        walls.forEach(w => {
+          minX = Math.min(minX, w.start.x, w.end.x); maxX = Math.max(maxX, w.start.x, w.end.x);
+          minZ = Math.min(minZ, w.start.y, w.end.y); maxZ = Math.max(maxZ, w.start.y, w.end.y);
+        });
         holes.forEach(h => {
-          minX = Math.min(minX, h.x - 10);
-          maxX = Math.max(maxX, h.x + 10);
-          minZ = Math.min(minZ, h.y - 10);
-          maxZ = Math.max(maxZ, h.y + 10);
+          minX = Math.min(minX, h.x - 10); maxX = Math.max(maxX, h.x + 10);
+          minZ = Math.min(minZ, h.y - 10); maxZ = Math.max(maxZ, h.y + 10);
         });
 
-        const width = (maxX - minX) + 20;
-        const depth = (maxZ - minZ) + 20;
-        
-        const floorGeom = prepareGeometryForCSG(new THREE.BoxGeometry(width, 2, depth));
-        const floorMaterial = new THREE.MeshStandardMaterial({ color: 0xaaaaaa });
-        
-        currentBrush = new Brush(floorGeom, floorMaterial);
-        currentBrush.position.set((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
-        currentBrush.updateMatrixWorld();
+        const floorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
+        const position = new THREE.Vector3((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
+        currentBrush = createCleanBrush(floorGeom, position);
       }
 
-      // 2. Subtract holes safely
+      // 2. Subtract Holes
       if (currentBrush && holes.length > 0) {
-        console.log(`Subtracting ${holes.length} holes...`);
         const evaluator = new Evaluator();
-        
-        // CRITICAL: Prevent Evaluator from splitting geometry into multiple material groups
-        evaluator.useGroups = false; 
+        evaluator.useGroups = false; // Prevent material grouping crashes
         
         for (const hole of holes) {
-          console.log(`Processing hole at ${hole.x}, ${hole.y}...`);
+          const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
+          const position = new THREE.Vector3(hole.x, 0, hole.y);
           
-          const holeGeom = prepareGeometryForCSG(new THREE.CylinderGeometry(2.25, 2.25, 200, 32));
-          const holeBrush = new Brush(holeGeom, new THREE.MeshStandardMaterial());
+          const holeBrush = createCleanBrush(holeGeom, position);
           
-          holeBrush.position.set(hole.x, 0, hole.y);
-          holeBrush.updateMatrixWorld();
-          
-          try {
-            currentBrush = evaluator.evaluate(currentBrush, holeBrush, SUBTRACTION);
-            currentBrush.updateMatrixWorld();
-          } catch (csgError) {
-            console.error('CSG subtraction failed for a hole:', csgError);
-          }
+          currentBrush = evaluator.evaluate(currentBrush, holeBrush, SUBTRACTION);
+          currentBrush.updateMatrixWorld();
         }
       }
 
       if (currentBrush) {
-        currentBrush.geometry.computeVertexNormals();
+        currentBrush.geometry.computeVertexNormals(); // Regenerate normals ONLY at the very end
         exportGroup.add(currentBrush);
       }
       
       if (wallsGroupRef.current) {
-        const wallsClone = wallsGroupRef.current.clone();
-        exportGroup.add(wallsClone);
+        exportGroup.add(wallsGroupRef.current.clone());
       }
       
       exportGroup.updateMatrixWorld(true);
       const result = exporter.parse(exportGroup, { binary: true });
       const blob = new Blob([result], { type: 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
+      
       const link = document.createElement('a');
-      link.href = url;
+      link.href = URL.createObjectURL(blob);
       link.download = 'maze_output.stl';
       link.click();
-      URL.revokeObjectURL(url);
+      
     } catch (error) {
-      console.error('Export error:', error);
-      alert('Error during export. Falling back to simple export without holes.');
-      
-      // Fallback: simple group export
-      const fallbackGroup = new THREE.Group();
-      if (baseMesh) fallbackGroup.add(baseMesh.clone());
-      if (wallsGroupRef.current) fallbackGroup.add(wallsGroupRef.current.clone());
-      
-      fallbackGroup.updateMatrixWorld(true);
-      const result = exporter.parse(fallbackGroup, { binary: true });
-      const blob = new Blob([result], { type: 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = 'maze_output_fallback.stl';
-      link.click();
-      URL.revokeObjectURL(url);
+      console.error('CSG Export Error:', error);
+      alert('Error during export check console.');
     } finally {
       setIsExporting(false);
     }
