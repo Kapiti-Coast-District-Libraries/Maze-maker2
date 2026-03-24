@@ -1,0 +1,5 @@
+{
+  "name": "3D Maze Architect",
+  "description": "Design custom 3D-printable mazes by drawing walls onto imported STL bases with precise 1.3mm thickness and 5mm height.",
+  "requestFramePermissions": []
+}
