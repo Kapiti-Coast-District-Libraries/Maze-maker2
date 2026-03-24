@@ -1,21 +1,17 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls, STLLoader, STLExporter, mergeVertices } from 'three-stdlib';
-import { CSG } from 'three-csg-ts';
+import { Evaluator, Brush, SUBTRACTION } from 'three-bvh-csg';
 import { 
-  Upload, 
   Download, 
   Trash2, 
-  Grid3X3, 
   MousePointer2, 
   PenTool,
   Box,
   Layers,
-  Settings2,
-  Maximize2,
-  Info,
   Circle,
-  Undo2
+  Undo2,
+  Info
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -174,6 +170,36 @@ export default function App() {
     scene.add(holesGroup);
     holesGroupRef.current = holesGroup;
 
+    // Load default STL file
+    const loader = new STLLoader();
+    const stlUrl = `${import.meta.env.BASE_URL}base.stl`;
+    
+    loader.load(stlUrl, (geometry) => {
+      const material = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, flatShading: true });
+      const mesh = new THREE.Mesh(geometry, material);
+      
+      // Center the mesh
+      geometry.computeBoundingBox();
+      const center = new THREE.Vector3();
+      geometry.boundingBox?.getCenter(center);
+      mesh.position.sub(center);
+      // Ensure it sits on the ground
+      mesh.position.y = - (geometry.boundingBox?.min.y || 0);
+
+      scene.add(mesh);
+      setBaseMesh(mesh);
+      
+      // Adjust camera to fit
+      const size = new THREE.Vector3();
+      geometry.boundingBox?.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      camera.position.set(maxDim * 1.5, maxDim * 1.5, maxDim * 1.5);
+      controls.target.set(0, size.y / 2, 0);
+      controls.update();
+    }, undefined, (error) => {
+      console.error('Error loading base.stl:', error);
+    });
+
     // Animation Loop
     let animationId: number;
     let frameCount = 0;
@@ -316,47 +342,6 @@ export default function App() {
       }
     }
   }, [walls, holes, currentWall, selectedHoleId, selectedWallId, hoveredId]);
-
-  // Handle STL Upload
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const contents = e.target?.result as ArrayBuffer;
-      const loader = new STLLoader();
-      const geometry = loader.parse(contents);
-      
-      if (baseMesh) {
-        sceneRef.current?.remove(baseMesh);
-        baseMesh.geometry.dispose();
-        (baseMesh.material as THREE.Material).dispose();
-      }
-
-      const material = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, flatShading: true });
-      const mesh = new THREE.Mesh(geometry, material);
-      
-      // Center the mesh
-      geometry.computeBoundingBox();
-      const center = new THREE.Vector3();
-      geometry.boundingBox?.getCenter(center);
-      mesh.position.sub(center);
-      // Ensure it sits on the ground
-      mesh.position.y = - (geometry.boundingBox?.min.y || 0);
-
-      sceneRef.current?.add(mesh);
-      setBaseMesh(mesh);
-      
-      // Adjust camera to fit
-      const size = new THREE.Vector3();
-      geometry.boundingBox?.getSize(size);
-      const maxDim = Math.max(size.x, size.y, size.z);
-      cameraRef.current?.position.set(maxDim * 1.5, maxDim * 1.5, maxDim * 1.5);
-      controlsRef.current?.target.set(0, size.y / 2, 0);
-    };
-    reader.readAsArrayBuffer(file);
-  };
 
   // Drawing Logic
   const getMousePoint = useCallback((e: React.MouseEvent | MouseEvent) => {
@@ -575,21 +560,25 @@ export default function App() {
     const exportGroup = new THREE.Group();
     
     try {
-      console.log('Starting STL Export with CSG (three-csg-ts)...');
-      let finalBaseMesh: THREE.Mesh | null = null;
+      console.log('Starting STL Export with CSG (three-bvh-csg)...');
+      let currentBrush: Brush | null = null;
       
-      // 1. Prepare the base mesh (either uploaded or default floor)
-      let baseMeshToProcess: THREE.Mesh | null = null;
-      
+      // 1. Prepare the base mesh (either loaded base.stl or default floor)
       if (baseMesh) {
-        console.log('Using uploaded base mesh...');
-        baseMeshToProcess = baseMesh.clone();
-        // Ensure geometry is indexed for CSG
-        if (!baseMeshToProcess.geometry.index) {
+        console.log('Using loaded base mesh...');
+        let geom = baseMesh.geometry.clone();
+        
+        // Ensure geometry is indexed for robust CSG logic
+        if (!geom.index) {
           console.log('Indexing base geometry...');
-          baseMeshToProcess.geometry = mergeVertices(baseMeshToProcess.geometry);
+          geom = mergeVertices(geom);
         }
-        baseMeshToProcess.updateMatrixWorld();
+        
+        currentBrush = new Brush(geom, baseMesh.material as THREE.Material);
+        currentBrush.position.copy(baseMesh.position);
+        currentBrush.rotation.copy(baseMesh.rotation);
+        currentBrush.scale.copy(baseMesh.scale);
+        currentBrush.updateMatrixWorld();
       } else if (holes.length > 0 || walls.length > 0) {
         console.log('Creating default floor...');
         let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
@@ -614,42 +603,35 @@ export default function App() {
         const depth = (maxZ - minZ) + 20;
         const floorGeom = new THREE.BoxGeometry(width, 2, depth);
         const floorMaterial = new THREE.MeshStandardMaterial({ color: 0xaaaaaa });
-        baseMeshToProcess = new THREE.Mesh(floorGeom, floorMaterial);
-        baseMeshToProcess.position.set((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
-        baseMeshToProcess.updateMatrixWorld();
+        currentBrush = new Brush(floorGeom, floorMaterial);
+        currentBrush.position.set((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
+        currentBrush.updateMatrixWorld();
       }
 
-      // 2. Subtract holes if we have a base and holes
-      if (baseMeshToProcess && holes.length > 0) {
+      // 2. Subtract holes safely
+      if (currentBrush && holes.length > 0) {
         console.log(`Subtracting ${holes.length} holes...`);
-        let currentResult = baseMeshToProcess;
+        const evaluator = new Evaluator();
         
         for (const hole of holes) {
           console.log(`Processing hole at ${hole.x}, ${hole.y}...`);
           const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
-          const holeMesh = new THREE.Mesh(holeGeom, new THREE.MeshBasicMaterial());
-          holeMesh.position.set(hole.x, 0, hole.y);
-          holeMesh.updateMatrixWorld();
+          const holeBrush = new Brush(holeGeom, new THREE.MeshBasicMaterial());
+          holeBrush.position.set(hole.x, 0, hole.y);
+          holeBrush.updateMatrixWorld();
           
           try {
-            const prevVertexCount = currentResult.geometry.attributes.position.count;
-            currentResult = CSG.subtract(currentResult, holeMesh);
-            const newVertexCount = currentResult.geometry.attributes.position.count;
-            console.log(`Hole subtraction result: ${prevVertexCount} -> ${newVertexCount} vertices`);
+            currentBrush = evaluator.evaluate(currentBrush, holeBrush, SUBTRACTION);
           } catch (csgError) {
             console.error('CSG subtraction failed for a hole:', csgError);
           }
         }
-        
-        finalBaseMesh = currentResult;
-      } else if (baseMeshToProcess) {
-        finalBaseMesh = baseMeshToProcess;
       }
 
-      if (finalBaseMesh) {
+      if (currentBrush) {
         // Ensure normals are correct for export
-        finalBaseMesh.geometry.computeVertexNormals();
-        exportGroup.add(finalBaseMesh);
+        currentBrush.geometry.computeVertexNormals();
+        exportGroup.add(currentBrush);
       }
       
       if (wallsGroupRef.current) {
@@ -770,39 +752,6 @@ export default function App() {
         {/* Sidebar */}
         <aside className="w-72 bg-white border-r border-neutral-200 flex flex-col z-20 shadow-xl">
           <div className="p-6 space-y-8 overflow-y-auto">
-            {/* Base STL Section */}
-            <section className="space-y-4">
-              <h2 className="text-[10px] font-black text-neutral-400 uppercase tracking-widest">Base Model</h2>
-              <div className="relative group">
-                <input 
-                  type="file" 
-                  accept=".stl" 
-                  onChange={handleFileUpload}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                />
-                <div className="border-2 border-dashed border-neutral-200 group-hover:border-blue-500 rounded-2xl p-8 transition-all text-center bg-neutral-50/50">
-                  <Upload className="w-8 h-8 text-neutral-300 mx-auto mb-3 group-hover:text-blue-500 transition-colors" />
-                  <p className="text-xs font-bold text-neutral-500">
-                    {baseMesh ? 'Change Base' : 'Import STL'}
-                  </p>
-                </div>
-              </div>
-              {baseMesh && (
-                <div className="flex items-center justify-between p-3 bg-blue-50 rounded-xl border border-blue-100">
-                  <div className="flex items-center gap-2">
-                    <Box className="w-4 h-4 text-blue-600" />
-                    <span className="text-xs font-bold text-blue-900 truncate max-w-[120px]">Base Loaded</span>
-                  </div>
-                  <button onClick={() => {
-                    if (baseMesh) sceneRef.current?.remove(baseMesh);
-                    setBaseMesh(null);
-                  }} className="text-blue-400 hover:text-blue-600">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              )}
-            </section>
-
             {/* Wall Settings */}
             <section className="space-y-4">
               <h2 className="text-[10px] font-black text-neutral-400 uppercase tracking-widest">Wall Specs</h2>
