@@ -103,9 +103,9 @@ export default function App() {
     setIsLoadingBase(true);
     const loader = new STLLoader();
     
-    // Assumes base.stl is placed in the public folder
+    // Using a relative path so GitHub pages resolves it correctly based on your repo name
     loader.load(
-      '/base.stl',
+      'base.stl',
       (geometry) => {
         if (baseMesh) {
           sceneRef.current?.remove(baseMesh);
@@ -136,7 +136,8 @@ export default function App() {
         }
       },
       undefined,
-      (error) => {
+      // Strictly typing this prevents GitHub Actions from failing the TypeScript build
+      (error: unknown) => {
         console.error('Error loading default base.stl:', error);
         setIsLoadingBase(false);
       }
@@ -637,7 +638,6 @@ export default function App() {
         }
 
         // 4. Subtract merged holes from Walls
-        // This ensures the hole cuts cleanly through both the floor and any intersecting walls
         if (holesUnionMesh && finalWallsGroup.children.length > 0) {
           const cutWallsGroup = new THREE.Group();
           
