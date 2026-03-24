@@ -3,19 +3,16 @@ import * as THREE from 'three';
 import { OrbitControls, STLLoader, STLExporter, mergeVertices } from 'three-stdlib';
 import { CSG } from 'three-csg-ts';
 import { 
-  Upload, 
   Download, 
   Trash2, 
-  Grid3X3, 
   MousePointer2, 
   PenTool,
   Box,
   Layers,
-  Settings2,
-  Maximize2,
   Info,
   Circle,
-  Undo2
+  Undo2,
+  RefreshCw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -52,6 +49,7 @@ export default function App() {
   const [history, setHistory] = useState<{ walls: Wall[], holes: Hole[] }[]>([]);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [isLoadingBase, setIsLoadingBase] = useState(false);
 
   const saveToHistory = useCallback(() => {
     setHistory(prev => [...prev, { walls: [...walls], holes: [...holes] }].slice(-30));
@@ -97,6 +95,53 @@ export default function App() {
       };
     }
   }, [activeTool]);
+
+  // Load the default base STL from the public folder
+  const loadDefaultBase = useCallback(() => {
+    if (!sceneRef.current) return;
+    
+    setIsLoadingBase(true);
+    const loader = new STLLoader();
+    
+    // Assumes base.stl is placed in the public folder
+    loader.load(
+      '/base.stl',
+      (geometry) => {
+        if (baseMesh) {
+          sceneRef.current?.remove(baseMesh);
+          baseMesh.geometry.dispose();
+          (baseMesh.material as THREE.Material).dispose();
+        }
+
+        const material = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, flatShading: true });
+        const mesh = new THREE.Mesh(geometry, material);
+        
+        geometry.computeBoundingBox();
+        const center = new THREE.Vector3();
+        geometry.boundingBox?.getCenter(center);
+        mesh.position.sub(center);
+        mesh.position.y = - (geometry.boundingBox?.min.y || 0);
+
+        sceneRef.current?.add(mesh);
+        setBaseMesh(mesh);
+        setIsLoadingBase(false);
+        
+        const size = new THREE.Vector3();
+        geometry.boundingBox?.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        if (cameraRef.current && controlsRef.current) {
+            cameraRef.current.position.set(maxDim * 1.5, maxDim * 1.5, maxDim * 1.5);
+            controlsRef.current.target.set(0, size.y / 2, 0);
+            controlsRef.current.update();
+        }
+      },
+      undefined,
+      (error) => {
+        console.error('Error loading default base.stl:', error);
+        setIsLoadingBase(false);
+      }
+    );
+  }, [baseMesh]);
 
   // Initialize Scene
   useEffect(() => {
@@ -194,6 +239,9 @@ export default function App() {
     });
     resizeObserver.observe(container);
 
+    // Initial load of the base STL
+    loadDefaultBase();
+
     return () => {
       cancelAnimationFrame(animationId);
       resizeObserver.disconnect();
@@ -204,6 +252,7 @@ export default function App() {
         container.removeChild(renderer.domElement);
       }
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Update Walls and Holes in Scene
@@ -301,43 +350,6 @@ export default function App() {
     }
   }, [walls, holes, currentWall, selectedHoleId, selectedWallId, hoveredId]);
 
-  // Handle STL Upload
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const contents = e.target?.result as ArrayBuffer;
-      const loader = new STLLoader();
-      const geometry = loader.parse(contents);
-      
-      if (baseMesh) {
-        sceneRef.current?.remove(baseMesh);
-        baseMesh.geometry.dispose();
-        (baseMesh.material as THREE.Material).dispose();
-      }
-
-      const material = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, flatShading: true });
-      const mesh = new THREE.Mesh(geometry, material);
-      
-      geometry.computeBoundingBox();
-      const center = new THREE.Vector3();
-      geometry.boundingBox?.getCenter(center);
-      mesh.position.sub(center);
-      mesh.position.y = - (geometry.boundingBox?.min.y || 0);
-
-      sceneRef.current?.add(mesh);
-      setBaseMesh(mesh);
-      
-      const size = new THREE.Vector3();
-      geometry.boundingBox?.getSize(size);
-      const maxDim = Math.max(size.x, size.y, size.z);
-      cameraRef.current?.position.set(maxDim * 1.5, maxDim * 1.5, maxDim * 1.5);
-      controlsRef.current?.target.set(0, size.y / 2, 0);
-    };
-    reader.readAsArrayBuffer(file);
-  };
 
   // Drawing Logic
   const getMousePoint = useCallback((e: React.MouseEvent | MouseEvent) => {
@@ -771,20 +783,22 @@ export default function App() {
             {/* Base STL Section */}
             <section className="space-y-4">
               <h2 className="text-[10px] font-black text-neutral-400 uppercase tracking-widest">Base Model</h2>
-              <div className="relative group">
-                <input 
-                  type="file" 
-                  accept=".stl" 
-                  onChange={handleFileUpload}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                />
-                <div className="border-2 border-dashed border-neutral-200 group-hover:border-blue-500 rounded-2xl p-8 transition-all text-center bg-neutral-50/50">
-                  <Upload className="w-8 h-8 text-neutral-300 mx-auto mb-3 group-hover:text-blue-500 transition-colors" />
-                  <p className="text-xs font-bold text-neutral-500">
-                    {baseMesh ? 'Change Base' : 'Import STL'}
-                  </p>
-                </div>
-              </div>
+              
+              <button
+                onClick={loadDefaultBase}
+                disabled={isLoadingBase}
+                className="w-full flex flex-col items-center justify-center p-8 border-2 border-dashed border-neutral-200 hover:border-blue-500 rounded-2xl transition-all bg-neutral-50/50 group disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isLoadingBase ? (
+                  <div className="w-8 h-8 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin mb-3" />
+                ) : (
+                  <RefreshCw className="w-8 h-8 text-neutral-300 mb-3 group-hover:text-blue-500 transition-colors" />
+                )}
+                <p className="text-xs font-bold text-neutral-500">
+                  {isLoadingBase ? 'Loading Base...' : 'Reload base.stl'}
+                </p>
+              </button>
+
               {baseMesh && (
                 <div className="flex items-center justify-between p-3 bg-blue-50 rounded-xl border border-blue-100">
                   <div className="flex items-center gap-2">
