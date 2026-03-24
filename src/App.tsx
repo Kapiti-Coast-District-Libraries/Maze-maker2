@@ -553,43 +553,21 @@ const exportSTL = async () => {
     if (!sceneRef.current) return;
     setIsExporting(true);
     
+    // Small delay to allow UI to update
     await new Promise(resolve => setTimeout(resolve, 100));
 
     const exporter = new STLExporter();
-    const exportGroup = new THREE.Group();
     
-    // ☢️ THE NUCLEAR OPTION: Strip EVERYTHING except pure X,Y,Z positions
-    const createCleanBrush = (originalGeom: THREE.BufferGeometry, position: THREE.Vector3, rotation?: THREE.Euler, scale?: THREE.Vector3) => {
-      const cleanGeom = new THREE.BufferGeometry();
-      
-      // Only copy the raw position data, absolutely nothing else
-      cleanGeom.setAttribute('position', originalGeom.getAttribute('position').clone());
-      
-      if (originalGeom.index) {
-        cleanGeom.setIndex(originalGeom.index.clone());
-      }
-      
-      // Heal the geometry and generate a perfect index
-      const mergedGeom = mergeVertices(cleanGeom, 1e-4);
-      
-      const brush = new Brush(mergedGeom, new THREE.MeshStandardMaterial());
-      brush.position.copy(position);
-      if (rotation) brush.rotation.copy(rotation);
-      if (scale) brush.scale.copy(scale);
-      
-      brush.updateMatrixWorld();
-      return brush;
-    };
-
     try {
-      console.log('Starting STL Export with Clean CSG...');
-      let currentBrush: Brush | null = null;
+      console.log('Starting Slicer-ready Export...');
       
-      // 1. Prepare Base Mesh
+      // --- 1. EXPORT SOLIDS (Base + Walls) ---
+      const solidsGroup = new THREE.Group();
+      
       if (baseMesh) {
-        currentBrush = createCleanBrush(baseMesh.geometry, baseMesh.position, baseMesh.rotation, baseMesh.scale);
+        solidsGroup.add(baseMesh.clone());
       } else if (holes.length > 0 || walls.length > 0) {
-        // Fallback Floor
+        // Create default floor if no base is loaded
         let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
         walls.forEach(w => {
           minX = Math.min(minX, w.start.x, w.end.x); maxX = Math.max(maxX, w.start.x, w.end.x);
@@ -601,46 +579,54 @@ const exportSTL = async () => {
         });
 
         const floorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
-        const position = new THREE.Vector3((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
-        currentBrush = createCleanBrush(floorGeom, position);
-      }
-
-      // 2. Subtract Holes
-      if (currentBrush && holes.length > 0) {
-        const evaluator = new Evaluator();
-        evaluator.useGroups = false; // Prevent material grouping crashes
-        
-        for (const hole of holes) {
-          const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
-          const position = new THREE.Vector3(hole.x, 0, hole.y);
-          
-          const holeBrush = createCleanBrush(holeGeom, position);
-          
-          currentBrush = evaluator.evaluate(currentBrush, holeBrush, SUBTRACTION);
-          currentBrush.updateMatrixWorld();
-        }
-      }
-
-      if (currentBrush) {
-        currentBrush.geometry.computeVertexNormals(); // Regenerate normals ONLY at the very end
-        exportGroup.add(currentBrush);
+        const floorMesh = new THREE.Mesh(floorGeom, new THREE.MeshStandardMaterial());
+        floorMesh.position.set((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
+        solidsGroup.add(floorMesh);
       }
       
       if (wallsGroupRef.current) {
-        exportGroup.add(wallsGroupRef.current.clone());
+        solidsGroup.add(wallsGroupRef.current.clone());
       }
       
-      exportGroup.updateMatrixWorld(true);
-      const result = exporter.parse(exportGroup, { binary: true });
-      const blob = new Blob([result], { type: 'application/octet-stream' });
+      solidsGroup.updateMatrixWorld(true);
+      const solidsResult = exporter.parse(solidsGroup, { binary: true });
+      const solidsBlob = new Blob([solidsResult], { type: 'application/octet-stream' });
+      const solidsUrl = URL.createObjectURL(solidsBlob);
       
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = 'maze_output.stl';
-      link.click();
+      const solidsLink = document.createElement('a');
+      solidsLink.href = solidsUrl;
+      solidsLink.download = 'maze_solids.stl';
+      solidsLink.click();
+      URL.revokeObjectURL(solidsUrl);
+
+      // --- 2. EXPORT HOLES (If any exist) ---
+      if (holes.length > 0) {
+        // Wait 500ms so the browser doesn't block the second consecutive download
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        const holesGroup = new THREE.Group();
+        holes.forEach(hole => {
+          // Create 200mm tall cylinders to ensure they cut all the way through
+          const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
+          const holeMesh = new THREE.Mesh(holeGeom, new THREE.MeshBasicMaterial());
+          holeMesh.position.set(hole.x, 0, hole.y);
+          holesGroup.add(holeMesh);
+        });
+        
+        holesGroup.updateMatrixWorld(true);
+        const holesResult = exporter.parse(holesGroup, { binary: true });
+        const holesBlob = new Blob([holesResult], { type: 'application/octet-stream' });
+        const holesUrl = URL.createObjectURL(holesBlob);
+        
+        const holesLink = document.createElement('a');
+        holesLink.href = holesUrl;
+        holesLink.download = 'maze_holes_NEGATIVE_VOLUME.stl';
+        holesLink.click();
+        URL.revokeObjectURL(holesUrl);
+      }
       
     } catch (error) {
-      console.error('CSG Export Error:', error);
+      console.error('Export Error:', error);
       alert('Error during export check console.');
     } finally {
       setIsExporting(false);
