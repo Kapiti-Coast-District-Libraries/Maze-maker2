@@ -6,7 +6,7 @@ import {defineConfig, loadEnv} from 'vite';
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
   return {
-    base: './', // Set to './' for relative paths, or '/repo-name/' for GitHub Pages subfolders
+    base: '/Maze-maker2/', // Set to your repository name for GitHub Pages subfolders
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
