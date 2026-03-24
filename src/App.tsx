@@ -549,7 +549,7 @@ export default function App() {
 
   const [isExporting, setIsExporting] = useState(false);
 
-  const exportSTL = async () => {
+const exportSTL = async () => {
     if (!sceneRef.current) return;
     setIsExporting(true);
     
@@ -559,6 +559,34 @@ export default function App() {
     const exporter = new STLExporter();
     const exportGroup = new THREE.Group();
     
+    // Helper to guarantee geometry is mathematically valid for CSG
+    const prepareGeometryForCSG = (geometry: THREE.BufferGeometry) => {
+      let geom = geometry.clone();
+      
+      // 1. Remove all attributes except position and normal to prevent mismatch crashes
+      const allowed = ['position', 'normal'];
+      Object.keys(geom.attributes).forEach(key => {
+        if (!allowed.includes(key)) {
+          geom.deleteAttribute(key);
+        }
+      });
+      
+      // 2. Merge vertices to fix floating point gaps (crucial for STLs)
+      geom = mergeVertices(geom, 1e-4);
+      geom.computeVertexNormals();
+      
+      // 3. CSG relies on indexed geometry. Guarantee it has an index.
+      if (!geom.index) {
+        const indexArray = new Uint32Array(geom.attributes.position.count);
+        for (let i = 0; i < indexArray.length; i++) {
+          indexArray[i] = i;
+        }
+        geom.setIndex(new THREE.BufferAttribute(indexArray, 1));
+      }
+      
+      return geom;
+    };
+
     try {
       console.log('Starting STL Export with CSG (three-bvh-csg)...');
       let currentBrush: Brush | null = null;
@@ -566,18 +594,9 @@ export default function App() {
       // 1. Prepare the base mesh
       if (baseMesh) {
         console.log('Using loaded base mesh...');
-        let geom = baseMesh.geometry.clone();
+        const baseGeom = prepareGeometryForCSG(baseMesh.geometry);
         
-        // Fix STL floating point gaps
-        geom = mergeVertices(geom, 1e-4);
-        geom.computeVertexNormals();
-        
-        // CRITICAL: Strip UVs if they exist so they don't crash against the cylinder
-        if (geom.attributes.uv) {
-          geom.deleteAttribute('uv');
-        }
-        
-        currentBrush = new Brush(geom, new THREE.MeshStandardMaterial({ color: 0xaaaaaa }));
+        currentBrush = new Brush(baseGeom, new THREE.MeshStandardMaterial({ color: 0xaaaaaa }));
         currentBrush.position.copy(baseMesh.position);
         currentBrush.rotation.copy(baseMesh.rotation);
         currentBrush.scale.copy(baseMesh.scale);
@@ -604,12 +623,10 @@ export default function App() {
 
         const width = (maxX - minX) + 20;
         const depth = (maxZ - minZ) + 20;
-        const floorGeom = new THREE.BoxGeometry(width, 2, depth);
         
-        // CRITICAL: Remove UVs from default floor to match holes
-        floorGeom.deleteAttribute('uv');
-        
+        const floorGeom = prepareGeometryForCSG(new THREE.BoxGeometry(width, 2, depth));
         const floorMaterial = new THREE.MeshStandardMaterial({ color: 0xaaaaaa });
+        
         currentBrush = new Brush(floorGeom, floorMaterial);
         currentBrush.position.set((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
         currentBrush.updateMatrixWorld();
@@ -625,12 +642,10 @@ export default function App() {
         
         for (const hole of holes) {
           console.log(`Processing hole at ${hole.x}, ${hole.y}...`);
-          const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
           
-          // CRITICAL: Remove UVs so they match the STL/Floor base attributes
-          holeGeom.deleteAttribute('uv');
-          
+          const holeGeom = prepareGeometryForCSG(new THREE.CylinderGeometry(2.25, 2.25, 200, 32));
           const holeBrush = new Brush(holeGeom, new THREE.MeshStandardMaterial());
+          
           holeBrush.position.set(hole.x, 0, hole.y);
           holeBrush.updateMatrixWorld();
           
