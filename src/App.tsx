@@ -560,60 +560,100 @@ export default function App() {
     const exportGroup = new THREE.Group();
     
     try {
-      console.log('Starting STL Export with CSG...');
+      console.log('Starting STL Export with CSG (three-bvh-csg)...');
       let currentBrush: Brush | null = null;
       
       // 1. Prepare the base mesh
       if (baseMesh) {
+        console.log('Using loaded base mesh...');
         let geom = baseMesh.geometry.clone();
         
-        // CRITICAL: Merge vertices with a small tolerance to fix STL floating point gaps
+        // Fix STL floating point gaps
         geom = mergeVertices(geom, 1e-4);
         geom.computeVertexNormals();
+        
+        // CRITICAL: Strip UVs if they exist so they don't crash against the cylinder
+        if (geom.attributes.uv) {
+          geom.deleteAttribute('uv');
+        }
         
         currentBrush = new Brush(geom, new THREE.MeshStandardMaterial({ color: 0xaaaaaa }));
         currentBrush.position.copy(baseMesh.position);
         currentBrush.rotation.copy(baseMesh.rotation);
         currentBrush.scale.copy(baseMesh.scale);
         currentBrush.updateMatrixWorld();
+      } else if (holes.length > 0 || walls.length > 0) {
+        console.log('Creating default floor...');
+        let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
+        
+        if (walls.length > 0) {
+          walls.forEach(w => {
+            minX = Math.min(minX, w.start.x, w.end.x);
+            maxX = Math.max(maxX, w.start.x, w.end.x);
+            minZ = Math.min(minZ, w.start.y, w.end.y);
+            maxZ = Math.max(maxZ, w.start.y, w.end.y);
+          });
+        }
+        
+        holes.forEach(h => {
+          minX = Math.min(minX, h.x - 10);
+          maxX = Math.max(maxX, h.x + 10);
+          minZ = Math.min(minZ, h.y - 10);
+          maxZ = Math.max(maxZ, h.y + 10);
+        });
+
+        const width = (maxX - minX) + 20;
+        const depth = (maxZ - minZ) + 20;
+        const floorGeom = new THREE.BoxGeometry(width, 2, depth);
+        
+        // CRITICAL: Remove UVs from default floor to match holes
+        floorGeom.deleteAttribute('uv');
+        
+        const floorMaterial = new THREE.MeshStandardMaterial({ color: 0xaaaaaa });
+        currentBrush = new Brush(floorGeom, floorMaterial);
+        currentBrush.position.set((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
+        currentBrush.updateMatrixWorld();
       }
 
-      // 2. Subtract holes
+      // 2. Subtract holes safely
       if (currentBrush && holes.length > 0) {
+        console.log(`Subtracting ${holes.length} holes...`);
         const evaluator = new Evaluator();
         
-        // CRITICAL: Prevent Evaluator from splitting geometry into multiple material groups.
-        // If true, the three.js STLExporter will skip faces or fail entirely.
+        // CRITICAL: Prevent Evaluator from splitting geometry into multiple material groups
         evaluator.useGroups = false; 
         
         for (const hole of holes) {
-          // Create a 200mm tall cylinder to ensure it cleanly pierces the entire base
+          console.log(`Processing hole at ${hole.x}, ${hole.y}...`);
           const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
-          const holeBrush = new Brush(holeGeom, new THREE.MeshStandardMaterial());
           
+          // CRITICAL: Remove UVs so they match the STL/Floor base attributes
+          holeGeom.deleteAttribute('uv');
+          
+          const holeBrush = new Brush(holeGeom, new THREE.MeshStandardMaterial());
           holeBrush.position.set(hole.x, 0, hole.y);
           holeBrush.updateMatrixWorld();
           
-          currentBrush = evaluator.evaluate(currentBrush, holeBrush, SUBTRACTION);
-          
-          // Must update matrix world of the new Brush before the next loop
-          currentBrush.updateMatrixWorld();
+          try {
+            currentBrush = evaluator.evaluate(currentBrush, holeBrush, SUBTRACTION);
+            currentBrush.updateMatrixWorld();
+          } catch (csgError) {
+            console.error('CSG subtraction failed for a hole:', csgError);
+          }
         }
       }
 
       if (currentBrush) {
-        // Add the final CSG cut result to the export group
+        currentBrush.geometry.computeVertexNormals();
         exportGroup.add(currentBrush);
       }
       
-      // Add all drawn walls
       if (wallsGroupRef.current) {
-        exportGroup.add(wallsGroupRef.current.clone());
+        const wallsClone = wallsGroupRef.current.clone();
+        exportGroup.add(wallsClone);
       }
       
-      // CRITICAL: Force update all matrices in the group so STLExporter reads correct global positions
       exportGroup.updateMatrixWorld(true);
-      
       const result = exporter.parse(exportGroup, { binary: true });
       const blob = new Blob([result], { type: 'application/octet-stream' });
       const url = URL.createObjectURL(blob);
@@ -644,7 +684,7 @@ export default function App() {
       setIsExporting(false);
     }
   };
-
+  
   return (
     <div className="flex flex-col h-screen bg-white font-sans text-neutral-900 overflow-hidden">
       {/* Header */}
