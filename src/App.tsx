@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
-import { OrbitControls, STLLoader, STLExporter, mergeVertices } from 'three-stdlib';
+import { OrbitControls, STLLoader, STLExporter, mergeVertices, mergeGeometries } from 'three-stdlib';
 import { Evaluator, Brush, SUBTRACTION } from 'three-bvh-csg';
 import { 
   Download, 
@@ -532,24 +532,9 @@ export default function App() {
     if (controlsRef.current) controlsRef.current.enabled = true;
   };
 
-  // Keyboard Listeners
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.key === 'Delete' || e.key === 'Backspace') && (selectedHoleId || selectedWallId)) {
-        deleteSelected();
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
-        e.preventDefault();
-        undo();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedHoleId, selectedWallId, history]);
-
   const [isExporting, setIsExporting] = useState(false);
 
-const exportSTL = async () => {
+  const exportSTL = async () => {
     if (!sceneRef.current) return;
     setIsExporting(true);
     
@@ -557,38 +542,33 @@ const exportSTL = async () => {
     await new Promise(resolve => setTimeout(resolve, 100));
 
     const exporter = new STLExporter();
+    const evaluator = new Evaluator();
 
-    // HELPER: Flattens and un-indexes geometries to prevent STLExporter binary crashes
-    const createExportModel = (objects: THREE.Object3D[]) => {
-      const group = new THREE.Group();
-      objects.forEach(obj => {
-        obj.traverse((child) => {
-          if (child instanceof THREE.Mesh) {
-            // Force geometry to be non-indexed so the exporter calculates byte sizes perfectly
-            const geom = child.geometry.index ? child.geometry.toNonIndexed() : child.geometry.clone();
-            geom.computeVertexNormals();
-            
-            const mesh = new THREE.Mesh(geom, child.material);
-            
-            // Bake the world position directly into the mesh
-            child.updateWorldMatrix(true, false);
-            mesh.applyMatrix4(child.matrixWorld);
-            
-            group.add(mesh);
-          }
-        });
-      });
-      return group;
+    // HELPER: Normalizes geometries so they can be merged without crashing
+    // Removes non-essential attributes (like UVs) and ensures everything is non-indexed
+    const cleanGeometry = (geom: THREE.BufferGeometry) => {
+      let cleaned = geom.clone();
+      for (const key in cleaned.attributes) {
+        if (key !== 'position' && key !== 'normal') {
+          cleaned.deleteAttribute(key);
+        }
+      }
+      if (cleaned.index) {
+        cleaned = cleaned.toNonIndexed();
+      }
+      return cleaned;
     };
     
     try {
-      console.log('Starting Slicer-ready Export...');
+      console.log('Starting CSG Subtraction and Export...');
       
-      // --- 1. EXPORT SOLIDS (Base + Walls) ---
-      const solidObjects: THREE.Object3D[] = [];
+      // --- 1. GATHER ALL SOLIDS ---
+      const solidGeometries: THREE.BufferGeometry[] = [];
       
       if (baseMesh) {
-        solidObjects.push(baseMesh);
+        const geom = baseMesh.geometry.clone();
+        geom.applyMatrix4(baseMesh.matrixWorld);
+        solidGeometries.push(cleanGeometry(geom));
       } else if (holes.length > 0 || walls.length > 0) {
         // Create default floor if no base is loaded
         let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
@@ -602,55 +582,77 @@ const exportSTL = async () => {
         });
 
         const floorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
-        const floorMesh = new THREE.Mesh(floorGeom, new THREE.MeshStandardMaterial());
-        floorMesh.position.set((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
-        solidObjects.push(floorMesh);
+        floorGeom.translate((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
+        solidGeometries.push(cleanGeometry(floorGeom));
       }
       
       if (wallsGroupRef.current) {
-        solidObjects.push(wallsGroupRef.current);
+        wallsGroupRef.current.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            const geom = child.geometry.clone();
+            child.updateWorldMatrix(true, false);
+            geom.applyMatrix4(child.matrixWorld);
+            solidGeometries.push(cleanGeometry(geom));
+          }
+        });
+      }
+
+      if (solidGeometries.length === 0) {
+        alert('Nothing to export!');
+        return;
       }
       
-      const solidsGroup = createExportModel(solidObjects);
-      const solidsResult = exporter.parse(solidsGroup, { binary: true });
-      const solidsBlob = new Blob([solidsResult], { type: 'application/octet-stream' });
-      const solidsUrl = URL.createObjectURL(solidsBlob);
+      // Merge all solid pieces into a single geometry
+      const mergedSolidGeom = mergeGeometries(solidGeometries, false);
+      if (!mergedSolidGeom) throw new Error("Failed to merge solid geometries");
       
-      const solidsLink = document.createElement('a');
-      solidsLink.href = solidsUrl;
-      solidsLink.download = 'maze_solids.stl';
-      solidsLink.click();
-      URL.revokeObjectURL(solidsUrl);
+      let finalSolidBrush = new Brush(mergedSolidGeom);
+      finalSolidBrush.updateMatrixWorld();
 
-      // --- 2. EXPORT HOLES (If any exist) ---
+      // --- 2. SUBTRACT HOLES USING CSG ---
       if (holes.length > 0) {
-        // Wait 500ms so the browser doesn't block the second consecutive download
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        const holeObjects: THREE.Object3D[] = [];
+        const holeGeometries: THREE.BufferGeometry[] = [];
         holes.forEach(hole => {
-          // Create 200mm tall cylinders to ensure they cut all the way through
+          // Create 200mm tall cylinders to ensure they cut entirely through the model
           const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
-          const holeMesh = new THREE.Mesh(holeGeom, new THREE.MeshBasicMaterial());
-          holeMesh.position.set(hole.x, 0, hole.y);
-          holeObjects.push(holeMesh);
+          holeGeom.translate(hole.x, 0, hole.y);
+          holeGeometries.push(cleanGeometry(holeGeom));
         });
         
-        const holesGroup = createExportModel(holeObjects);
-        const holesResult = exporter.parse(holesGroup, { binary: true });
-        const holesBlob = new Blob([holesResult], { type: 'application/octet-stream' });
-        const holesUrl = URL.createObjectURL(holesBlob);
-        
-        const holesLink = document.createElement('a');
-        holesLink.href = holesUrl;
-        holesLink.download = 'maze_holes_NEGATIVE_VOLUME.stl';
-        holesLink.click();
-        URL.revokeObjectURL(holesUrl);
+        const mergedHoleGeom = mergeGeometries(holeGeometries, false);
+        if (mergedHoleGeom) {
+          const holesBrush = new Brush(mergedHoleGeom);
+          holesBrush.updateMatrixWorld();
+          
+          // Perform the boolean subtraction!
+          finalSolidBrush = evaluator.evaluate(finalSolidBrush, holesBrush, SUBTRACTION);
+        }
       }
       
+      // --- 3. EXPORT FINAL MESH ---
+      const exportGroup = new THREE.Group();
+      
+      // Force non-indexed to prevent STLExporter binary crashes and properly compute normals
+      const exportGeom = finalSolidBrush.geometry.index ? finalSolidBrush.geometry.toNonIndexed() : finalSolidBrush.geometry;
+      exportGeom.computeVertexNormals();
+      
+      const exportMesh = new THREE.Mesh(exportGeom, new THREE.MeshStandardMaterial());
+      exportGroup.add(exportMesh);
+      
+      const stlResult = exporter.parse(exportGroup, { binary: true });
+      const stlBlob = new Blob([stlResult], { type: 'application/octet-stream' });
+      const stlUrl = URL.createObjectURL(stlBlob);
+      
+      const link = document.createElement('a');
+      link.href = stlUrl;
+      link.download = 'maze_architect_export.stl';
+      link.click();
+      URL.revokeObjectURL(stlUrl);
+      
+      console.log('Export Complete!');
     } catch (error) {
       console.error('Export Error:', error);
-      alert('Error during export check console.');
+      alert('Error during export. Check the console for details.');
     } finally {
       setIsExporting(false);
     }
