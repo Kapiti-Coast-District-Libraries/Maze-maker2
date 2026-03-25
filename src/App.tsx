@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
-import { OrbitControls, STLLoader, STLExporter, mergeVertices, mergeBufferGeometries as mergeGeometries } from 'three-stdlib';
-import { CSG } from 'three-csg-ts';
+import { OrbitControls, STLLoader, STLExporter, SVGLoader } from 'three-stdlib';import { CSG } from 'three-csg-ts';
 import { 
   Download, 
   Trash2, 
@@ -505,7 +504,7 @@ export default function App() {
     if (controlsRef.current) controlsRef.current.enabled = true;
   };
 
-  const [isExporting, setIsExporting] = useState(false);
+const [isExporting, setIsExporting] = useState(false);
 
   const exportSTL = async () => {
     if (!sceneRef.current) return;
@@ -515,69 +514,89 @@ export default function App() {
     await new Promise(resolve => setTimeout(resolve, 100));
 
     const exporter = new STLExporter();
+    const exportGroup = new THREE.Group();
 
-    // HELPER: Safely prepares geometries for merging and CSG math. 
-    // It strips non-essential attributes and, crucially, fuses the raw triangle soup into a solid volume.
-    const cleanForCSG = (geom: THREE.BufferGeometry) => {
-      let cleaned = geom.clone();
+    try {
+      console.log('Loading SVG floor boundary...');
+
+      // --- 1. Load the SVG file from the public folder ---
+      const loader = new SVGLoader();
+      const svgUrl = `${import.meta.env.BASE_URL}floor.svg`; // Put floor.svg in your public folder!
       
-      // Strip everything except position to prevent mergeGeometries from failing 
-      for (const key in cleaned.attributes) {
-        if (key !== 'position') {
-          cleaned.deleteAttribute(key);
+      const svgData = await new Promise<any>((resolve, reject) => {
+        loader.load(svgUrl, resolve, undefined, reject);
+      });
+
+      // --- 2. Extract the Shape from the SVG ---
+      // SVGLoader returns paths. We take the first valid path and turn it into a Shape.
+      let floorShape: THREE.Shape | null = null;
+      for (const path of svgData.paths) {
+        const shapes = SVGLoader.createShapes(path);
+        if (shapes && shapes.length > 0) {
+          floorShape = shapes[0];
+          break; // Grab the first shape we find
         }
       }
-      cleaned.clearGroups();
 
-      // Merge vertices to fix non-manifold geometry (Triangle soup to solid)
-      cleaned = mergeVertices(cleaned, 1e-4);
-      cleaned.computeVertexNormals();
-
-      return cleaned;
-    };
-    
-    try {
-      console.log('Starting iterative CSG Subtraction...');
-      
-      // --- 1. GATHER ALL SOLIDS ---
-      const solidGeometries: THREE.BufferGeometry[] = [];
-      
-      if (baseMesh) {
-        const geom = baseMesh.geometry.clone();
-        geom.applyMatrix4(baseMesh.matrixWorld);
-        solidGeometries.push(cleanForCSG(geom));
-      } else if (holes.length > 0 || walls.length > 0) {
-        let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
-        walls.forEach(w => {
-          minX = Math.min(minX, w.start.x, w.end.x); maxX = Math.max(maxX, w.start.x, w.end.x);
-          minZ = Math.min(minZ, w.start.y, w.end.y); maxZ = Math.max(maxZ, w.start.y, w.end.y);
-        });
-        holes.forEach(h => {
-          minX = Math.min(minX, h.x - 10); maxX = Math.max(maxX, h.x + 10);
-          minZ = Math.min(minZ, h.y - 10); maxZ = Math.max(maxZ, h.y + 10);
-        });
-
-        const floorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
-        floorGeom.translate((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
-        solidGeometries.push(cleanForCSG(floorGeom));
+      if (!floorShape) {
+        throw new Error("Could not find a valid shape in the SVG.");
       }
+
+      // --- 3. Punch the 2D Holes ---
+      holes.forEach(hole => {
+        const holePath = new THREE.Path();
+        // Draw clockwise so Three.js knows it's a hole!
+        holePath.absarc(hole.x, hole.y, 2.25, 0, Math.PI * 2, true);
+        floorShape!.holes.push(holePath);
+      });
+
+      // --- 4. Extrude the 2D Shape into a perfect 3D Floor ---
+      const extrudeSettings = {
+        depth: 2, // 2mm thickness for the floor
+        bevelEnabled: false,
+        curveSegments: 32 // High resolution for smooth circles
+      };
+      const floorGeom = new THREE.ExtrudeGeometry(floorShape, extrudeSettings);
       
+      // Depending on how your CAD program exports the SVG, you might need to rotate/flip it 
+      // so it sits flat on the XZ plane just like the walls.
+      floorGeom.rotateX(-Math.PI / 2);
+      
+      // Center the floor geometry if your SVG wasn't centered at 0,0
+      floorGeom.computeBoundingBox();
+      const center = new THREE.Vector3();
+      floorGeom.boundingBox?.getCenter(center);
+      floorGeom.translate(-center.x, 0, -center.z); 
+      
+      floorGeom.computeVertexNormals();
+
+      const floorMesh = new THREE.Mesh(floorGeom, new THREE.MeshStandardMaterial());
+      exportGroup.add(floorMesh);
+
+      // --- 5. Add Walls ---
       if (wallsGroupRef.current) {
-        wallsGroupRef.current.traverse((child) => {
-          if (child instanceof THREE.Mesh) {
-            const geom = child.geometry.clone();
-            child.updateWorldMatrix(true, false);
-            geom.applyMatrix4(child.matrixWorld);
-            solidGeometries.push(cleanForCSG(geom));
-          }
-        });
+        exportGroup.add(wallsGroupRef.current.clone());
       }
 
-      if (solidGeometries.length === 0) {
-        alert('Nothing to export!');
-        setIsExporting(false);
-        return;
-      }
+      // --- 6. Export ---
+      const stlResult = exporter.parse(exportGroup, { binary: true });
+      const stlBlob = new Blob([stlResult], { type: 'application/octet-stream' });
+      const stlUrl = URL.createObjectURL(stlBlob);
+      
+      const link = document.createElement('a');
+      link.href = stlUrl;
+      link.download = 'maze_architect_custom_floor.stl';
+      link.click();
+      URL.revokeObjectURL(stlUrl);
+      
+      console.log('Export Complete!');
+    } catch (error) {
+      console.error('Export Error:', error);
+      alert('Error during export. Did you put "floor.svg" in the public folder?');
+    } finally {
+      setIsExporting(false);
+    }
+  };
       
       // Merge base plate and walls into ONE single watertight volume
       const mergedSolidGeom = mergeGeometries(solidGeometries, false);
