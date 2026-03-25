@@ -79,14 +79,12 @@ export default function App() {
     if (!controlsRef.current) return;
     
     if (activeTool === 'draw' || activeTool === 'hole') {
-      // Disable left-click rotation for drawing tools
       controlsRef.current.mouseButtons = {
         LEFT: null,
         MIDDLE: THREE.MOUSE.PAN,
         RIGHT: THREE.MOUSE.ROTATE
       };
     } else {
-      // Restore default controls for select/view mode
       controlsRef.current.mouseButtons = {
         LEFT: THREE.MOUSE.ROTATE,
         MIDDLE: THREE.MOUSE.PAN,
@@ -110,7 +108,6 @@ export default function App() {
       }));
     };
 
-    // Clean up any existing canvas
     container.innerHTML = '';
 
     const scene = new THREE.Scene();
@@ -138,7 +135,6 @@ export default function App() {
     controls.dampingFactor = 0.05;
     controlsRef.current = controls;
 
-    // Lights
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
     scene.add(ambientLight);
 
@@ -147,12 +143,10 @@ export default function App() {
     dirLight.castShadow = true;
     scene.add(dirLight);
 
-    // Grid
     const gridHelper = new THREE.GridHelper(400, 80, 0xcccccc, 0xeeeeee);
     scene.add(gridHelper);
     gridHelperRef.current = gridHelper;
 
-    // Drawing Plane
     const planeGeom = new THREE.PlaneGeometry(2000, 2000);
     const planeMat = new THREE.MeshBasicMaterial({ visible: false });
     const drawingPlane = new THREE.Mesh(planeGeom, planeMat);
@@ -160,17 +154,14 @@ export default function App() {
     scene.add(drawingPlane);
     drawingPlaneRef.current = drawingPlane;
 
-    // Walls Group
     const wallsGroup = new THREE.Group();
     scene.add(wallsGroup);
     wallsGroupRef.current = wallsGroup;
 
-    // Holes Group
     const holesGroup = new THREE.Group();
     scene.add(holesGroup);
     holesGroupRef.current = holesGroup;
 
-    // Load default STL file
     const loader = new STLLoader();
     const stlUrl = `${import.meta.env.BASE_URL}base.stl`;
     
@@ -178,18 +169,15 @@ export default function App() {
       const material = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, flatShading: true });
       const mesh = new THREE.Mesh(geometry, material);
       
-      // Center the mesh
       geometry.computeBoundingBox();
       const center = new THREE.Vector3();
       geometry.boundingBox?.getCenter(center);
       mesh.position.sub(center);
-      // Ensure it sits on the ground
       mesh.position.y = - (geometry.boundingBox?.min.y || 0);
 
       scene.add(mesh);
       setBaseMesh(mesh);
       
-      // Adjust camera to fit
       const size = new THREE.Vector3();
       geometry.boundingBox?.getSize(size);
       const maxDim = Math.max(size.x, size.y, size.z);
@@ -200,7 +188,6 @@ export default function App() {
       console.error('Error loading base.stl:', error);
     });
 
-    // Animation Loop
     let animationId: number;
     let frameCount = 0;
     const animate = () => {
@@ -216,7 +203,6 @@ export default function App() {
     };
     animate();
 
-    // Resize Observer
     const resizeObserver = new ResizeObserver(() => {
       if (!cameraRef.current || !rendererRef.current || !container) return;
       const rect = container.getBoundingClientRect();
@@ -241,11 +227,10 @@ export default function App() {
     };
   }, []);
 
-  // Update Walls and Holes in Scene
+  // Update Walls and Holes
   useEffect(() => {
     if (!wallsGroupRef.current || !holesGroupRef.current) return;
     
-    // Clear existing walls
     while(wallsGroupRef.current.children.length > 0){ 
       const child = wallsGroupRef.current.children[0] as THREE.Mesh;
       child.geometry.dispose();
@@ -253,7 +238,6 @@ export default function App() {
       wallsGroupRef.current.remove(child); 
     }
 
-    // Clear existing holes
     while(holesGroupRef.current.children.length > 0){ 
       const child = holesGroupRef.current.children[0] as THREE.Mesh;
       child.geometry.dispose();
@@ -275,7 +259,6 @@ export default function App() {
       const isHovered = wall.id === hoveredId;
       const material = isSelected ? selectedWallMaterial : (isHovered ? new THREE.MeshStandardMaterial({ color: 0x60a5fa }) : wallMaterial);
 
-      // Wall segment
       const geometry = new THREE.BoxGeometry(length, WALL_HEIGHT, WALL_THICKNESS);
       const mesh = new THREE.Mesh(geometry, material);
       const angle = Math.atan2(dz, dx);
@@ -287,7 +270,6 @@ export default function App() {
       );
       wallsGroupRef.current?.add(mesh);
 
-      // Corner pillars (joints)
       const pillarGeom = new THREE.CylinderGeometry(WALL_THICKNESS / 2, WALL_THICKNESS / 2, WALL_HEIGHT, 16);
       
       const startPillar = new THREE.Mesh(pillarGeom, material);
@@ -311,7 +293,6 @@ export default function App() {
       holesGroupRef.current?.add(mesh);
     });
 
-    // Add current wall being drawn
     if (currentWall) {
       const dx = currentWall.end.x - currentWall.start.x;
       const dz = currentWall.end.y - currentWall.start.y;
@@ -319,7 +300,6 @@ export default function App() {
       if (length > 0.1) {
         const previewMat = new THREE.MeshStandardMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.5 });
         
-        // Preview segment
         const geometry = new THREE.BoxGeometry(length, WALL_HEIGHT, WALL_THICKNESS);
         const mesh = new THREE.Mesh(geometry, previewMat);
         const angle = Math.atan2(dz, dx);
@@ -331,7 +311,6 @@ export default function App() {
         );
         wallsGroupRef.current?.add(mesh);
 
-        // Preview pillars
         const pillarGeom = new THREE.CylinderGeometry(WALL_THICKNESS / 2, WALL_THICKNESS / 2, WALL_HEIGHT, 16);
         const startPillar = new THREE.Mesh(pillarGeom, previewMat);
         startPillar.position.set(currentWall.start.x, WALL_HEIGHT / 2, currentWall.start.y);
@@ -357,7 +336,6 @@ export default function App() {
     if (intersects.length > 0) {
       const rawPoint = { x: intersects[0].point.x, y: intersects[0].point.z };
       
-      // Check if raw point is inside
       if (baseMesh) {
         const checkRaycaster = new THREE.Raycaster();
         checkRaycaster.set(new THREE.Vector3(rawPoint.x, 1000, rawPoint.y), new THREE.Vector3(0, -1, 0));
@@ -369,7 +347,6 @@ export default function App() {
         const snappedX = Math.round(rawPoint.x / GRID_SIZE) * GRID_SIZE;
         const snappedY = Math.round(rawPoint.y / GRID_SIZE) * GRID_SIZE;
         
-        // Check if snapped point is inside
         if (baseMesh) {
           const checkRaycaster = new THREE.Raycaster();
           checkRaycaster.set(new THREE.Vector3(snappedX, 1000, snappedY), new THREE.Vector3(0, -1, 0));
@@ -397,7 +374,7 @@ export default function App() {
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (e.button !== 0) return; // Only left click
+    if (e.button !== 0) return; 
     const point = getMousePoint(e);
     if (!point) return;
 
@@ -409,10 +386,9 @@ export default function App() {
       saveToHistory();
       setHoles(prev => [...prev, { id: crypto.randomUUID(), x: point.x, y: point.y }]);
     } else if (activeTool === 'select') {
-      // Check if clicked on a hole
       const clickedHole = holes.find(h => {
         const d = Math.sqrt((h.x - point.x) ** 2 + (h.y - point.y) ** 2);
-        return d < 8; // Increased from 5mm to 8mm radius for easier selection
+        return d < 8; 
       });
       
       if (clickedHole) {
@@ -423,8 +399,7 @@ export default function App() {
         return;
       }
 
-      // Check if clicked on a wall
-      const clickedWall = walls.find(w => getDistanceToWall(point, w) < 5); // Increased from 3mm to 5mm
+      const clickedWall = walls.find(w => getDistanceToWall(point, w) < 5); 
       if (clickedWall) {
         saveToHistory();
         setSelectedWallId(clickedWall.id);
@@ -451,7 +426,6 @@ export default function App() {
       
       setWalls(prev => prev.map(w => {
         if (w.id === selectedWallId) {
-          // Check if new position is valid (both ends inside)
           const newStart = { x: w.start.x + dx, y: w.start.y + dy };
           const newEnd = { x: w.end.x + dx, y: w.end.y + dy };
           
@@ -465,7 +439,7 @@ export default function App() {
             const endIntersects = checkRaycaster.intersectObject(baseMesh);
             
             if (startIntersects.length === 0 || endIntersects.length === 0) {
-              return w; // Don't move if it goes outside
+              return w; 
             }
           }
           
@@ -475,7 +449,6 @@ export default function App() {
       }));
       setDragStartPoint(point);
     } else if (activeTool === 'select') {
-      // Hover detection
       const hoveredHole = holes.find(h => Math.sqrt((h.x - point.x) ** 2 + (h.y - point.y) ** 2) < 8);
       if (hoveredHole) {
         setHoveredId(hoveredHole.id);
@@ -538,26 +511,33 @@ export default function App() {
     if (!sceneRef.current) return;
     setIsExporting(true);
     
+    // Small delay to allow UI to update
     await new Promise(resolve => setTimeout(resolve, 100));
 
     const exporter = new STLExporter();
 
-    // Helper: Safely prepares geometries for merging and CSG operations
-    const cleanGeometry = (geom: THREE.BufferGeometry) => {
+    // HELPER: Safely prepares geometries for merging and CSG math. 
+    // It strips non-essential attributes and, crucially, fuses the raw triangle soup into a solid volume.
+    const cleanForCSG = (geom: THREE.BufferGeometry) => {
       let cleaned = geom.clone();
+      
+      // Strip everything except position to prevent mergeGeometries from failing 
       for (const key in cleaned.attributes) {
-        if (key !== 'position' && key !== 'normal') {
+        if (key !== 'position') {
           cleaned.deleteAttribute(key);
         }
       }
-      if (cleaned.index) {
-        cleaned = cleaned.toNonIndexed();
-      }
+      cleaned.clearGroups();
+
+      // Merge vertices to fix non-manifold geometry (Triangle soup to solid)
+      cleaned = mergeVertices(cleaned, 1e-4);
+      cleaned.computeVertexNormals();
+
       return cleaned;
     };
     
     try {
-      console.log('Starting CSG Subtraction and Export with three-csg-ts...');
+      console.log('Starting perfect CSG Subtraction and Export...');
       
       // --- 1. GATHER ALL SOLIDS ---
       const solidGeometries: THREE.BufferGeometry[] = [];
@@ -565,7 +545,7 @@ export default function App() {
       if (baseMesh) {
         const geom = baseMesh.geometry.clone();
         geom.applyMatrix4(baseMesh.matrixWorld);
-        solidGeometries.push(cleanGeometry(geom));
+        solidGeometries.push(cleanForCSG(geom));
       } else if (holes.length > 0 || walls.length > 0) {
         let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
         walls.forEach(w => {
@@ -579,7 +559,7 @@ export default function App() {
 
         const floorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
         floorGeom.translate((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
-        solidGeometries.push(cleanGeometry(floorGeom));
+        solidGeometries.push(cleanForCSG(floorGeom));
       }
       
       if (wallsGroupRef.current) {
@@ -588,7 +568,7 @@ export default function App() {
             const geom = child.geometry.clone();
             child.updateWorldMatrix(true, false);
             geom.applyMatrix4(child.matrixWorld);
-            solidGeometries.push(cleanGeometry(geom));
+            solidGeometries.push(cleanForCSG(geom));
           }
         });
       }
@@ -599,45 +579,45 @@ export default function App() {
         return;
       }
       
+      // Merge base plate and walls into ONE single watertight volume
       const mergedSolidGeom = mergeGeometries(solidGeometries, false);
       if (!mergedSolidGeom) throw new Error("Failed to merge solid geometries");
-      const solidMesh = new THREE.Mesh(mergedSolidGeom, new THREE.MeshStandardMaterial());
-      solidMesh.updateMatrixWorld();
+      let finalSolidMesh = new THREE.Mesh(mergedSolidGeom, new THREE.MeshStandardMaterial());
+      finalSolidMesh.updateMatrixWorld();
 
-      let finalExportMesh = solidMesh;
-
-      // --- 2. GATHER AND SUBTRACT HOLES ---
+      // --- 2. SUBTRACT HOLES USING CSG ---
       if (holes.length > 0) {
         const holeGeometries: THREE.BufferGeometry[] = [];
         holes.forEach(hole => {
-          // Extra tall to guarantee cutting entirely through the floor and walls
+          // Extra tall to ensure it completely blows through the floor and walls
           const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
           holeGeom.translate(hole.x, 0, hole.y);
-          holeGeometries.push(cleanGeometry(holeGeom));
+          holeGeometries.push(cleanForCSG(holeGeom));
         });
         
+        // Merge all holes into ONE single volume
         const mergedHoleGeom = mergeGeometries(holeGeometries, false);
         if (mergedHoleGeom) {
           const holeMesh = new THREE.Mesh(mergedHoleGeom, new THREE.MeshStandardMaterial());
           holeMesh.updateMatrixWorld();
           
-          // Execute single CSG subtract for all holes globally
-          finalExportMesh = CSG.subtract(solidMesh, holeMesh);
+          // PERFORM SUBTRACTION 
+          finalSolidMesh = CSG.subtract(finalSolidMesh, holeMesh);
         }
       }
       
-      // --- 3. EXPORT ---
+      // --- 3. EXPORT FINAL MESH ---
       const exportGroup = new THREE.Group();
       
-      // One final sanitation pass to ensure the data format is pure before exporting
-      let finalGeom = finalExportMesh.geometry;
-      if (finalGeom.index) {
-        finalGeom = finalGeom.toNonIndexed();
+      // Convert to non-indexed one final time to prevent STLExporter from getting confused
+      let exportGeom = finalSolidMesh.geometry.clone();
+      if (exportGeom.index) {
+        exportGeom = exportGeom.toNonIndexed();
       }
-      finalGeom.computeVertexNormals();
+      exportGeom.computeVertexNormals();
       
-      const finalCleanMesh = new THREE.Mesh(finalGeom, new THREE.MeshStandardMaterial());
-      exportGroup.add(finalCleanMesh);
+      const exportMesh = new THREE.Mesh(exportGeom, new THREE.MeshStandardMaterial());
+      exportGroup.add(exportMesh);
       
       const stlResult = exporter.parse(exportGroup, { binary: true });
       const stlBlob = new Blob([stlResult], { type: 'application/octet-stream' });
@@ -657,7 +637,7 @@ export default function App() {
       setIsExporting(false);
     }
   };
-
+  
   return (
     <div className="flex flex-col h-screen bg-white font-sans text-neutral-900 overflow-hidden">
       {/* Header */}
