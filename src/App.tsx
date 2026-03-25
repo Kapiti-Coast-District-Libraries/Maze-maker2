@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls, STLLoader, STLExporter, mergeVertices, mergeGeometries } from 'three-stdlib';
-import { Evaluator, Brush, SUBTRACTION } from 'three-bvh-csg';
+import { CSG } from 'three-csg-ts';
 import { 
   Download, 
   Trash2, 
@@ -538,14 +538,11 @@ export default function App() {
     if (!sceneRef.current) return;
     setIsExporting(true);
     
-    // Small delay to allow UI to update
     await new Promise(resolve => setTimeout(resolve, 100));
 
     const exporter = new STLExporter();
-    const evaluator = new Evaluator();
 
-    // HELPER: Normalizes geometries so they can be merged without crashing
-    // Removes non-essential attributes (like UVs) and ensures everything is non-indexed
+    // Helper: Safely prepares geometries for merging and CSG operations
     const cleanGeometry = (geom: THREE.BufferGeometry) => {
       let cleaned = geom.clone();
       for (const key in cleaned.attributes) {
@@ -560,7 +557,7 @@ export default function App() {
     };
     
     try {
-      console.log('Starting CSG Subtraction and Export...');
+      console.log('Starting CSG Subtraction and Export with three-csg-ts...');
       
       // --- 1. GATHER ALL SOLIDS ---
       const solidGeometries: THREE.BufferGeometry[] = [];
@@ -570,7 +567,6 @@ export default function App() {
         geom.applyMatrix4(baseMesh.matrixWorld);
         solidGeometries.push(cleanGeometry(geom));
       } else if (holes.length > 0 || walls.length > 0) {
-        // Create default floor if no base is loaded
         let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
         walls.forEach(w => {
           minX = Math.min(minX, w.start.x, w.end.x); maxX = Math.max(maxX, w.start.x, w.end.x);
@@ -599,21 +595,22 @@ export default function App() {
 
       if (solidGeometries.length === 0) {
         alert('Nothing to export!');
+        setIsExporting(false);
         return;
       }
       
-      // Merge all solid pieces into a single geometry
       const mergedSolidGeom = mergeGeometries(solidGeometries, false);
       if (!mergedSolidGeom) throw new Error("Failed to merge solid geometries");
-      
-      let finalSolidBrush = new Brush(mergedSolidGeom);
-      finalSolidBrush.updateMatrixWorld();
+      const solidMesh = new THREE.Mesh(mergedSolidGeom, new THREE.MeshStandardMaterial());
+      solidMesh.updateMatrixWorld();
 
-      // --- 2. SUBTRACT HOLES USING CSG ---
+      let finalExportMesh = solidMesh;
+
+      // --- 2. GATHER AND SUBTRACT HOLES ---
       if (holes.length > 0) {
         const holeGeometries: THREE.BufferGeometry[] = [];
         holes.forEach(hole => {
-          // Create 200mm tall cylinders to ensure they cut entirely through the model
+          // Extra tall to guarantee cutting entirely through the floor and walls
           const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
           holeGeom.translate(hole.x, 0, hole.y);
           holeGeometries.push(cleanGeometry(holeGeom));
@@ -621,23 +618,26 @@ export default function App() {
         
         const mergedHoleGeom = mergeGeometries(holeGeometries, false);
         if (mergedHoleGeom) {
-          const holesBrush = new Brush(mergedHoleGeom);
-          holesBrush.updateMatrixWorld();
+          const holeMesh = new THREE.Mesh(mergedHoleGeom, new THREE.MeshStandardMaterial());
+          holeMesh.updateMatrixWorld();
           
-          // Perform the boolean subtraction!
-          finalSolidBrush = evaluator.evaluate(finalSolidBrush, holesBrush, SUBTRACTION);
+          // Execute single CSG subtract for all holes globally
+          finalExportMesh = CSG.subtract(solidMesh, holeMesh);
         }
       }
       
-      // --- 3. EXPORT FINAL MESH ---
+      // --- 3. EXPORT ---
       const exportGroup = new THREE.Group();
       
-      // Force non-indexed to prevent STLExporter binary crashes and properly compute normals
-      const exportGeom = finalSolidBrush.geometry.index ? finalSolidBrush.geometry.toNonIndexed() : finalSolidBrush.geometry;
-      exportGeom.computeVertexNormals();
+      // One final sanitation pass to ensure the data format is pure before exporting
+      let finalGeom = finalExportMesh.geometry;
+      if (finalGeom.index) {
+        finalGeom = finalGeom.toNonIndexed();
+      }
+      finalGeom.computeVertexNormals();
       
-      const exportMesh = new THREE.Mesh(exportGeom, new THREE.MeshStandardMaterial());
-      exportGroup.add(exportMesh);
+      const finalCleanMesh = new THREE.Mesh(finalGeom, new THREE.MeshStandardMaterial());
+      exportGroup.add(finalCleanMesh);
       
       const stlResult = exporter.parse(exportGroup, { binary: true });
       const stlBlob = new Blob([stlResult], { type: 'application/octet-stream' });
@@ -657,7 +657,7 @@ export default function App() {
       setIsExporting(false);
     }
   };
-  
+
   return (
     <div className="flex flex-col h-screen bg-white font-sans text-neutral-900 overflow-hidden">
       {/* Header */}
