@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
-import { OrbitControls, STLLoader, STLExporter, mergeVertices, mergeGeometries } from 'three-stdlib';
+import { OrbitControls, STLLoader, STLExporter, mergeVertices, mergeBufferGeometries as mergeGeometries } from 'three-stdlib';
 import { CSG } from 'three-csg-ts';
 import { 
   Download, 
