@@ -537,7 +537,7 @@ export default function App() {
     };
     
     try {
-      console.log('Starting perfect CSG Subtraction and Export...');
+      console.log('Starting iterative CSG Subtraction...');
       
       // --- 1. GATHER ALL SOLIDS ---
       const solidGeometries: THREE.BufferGeometry[] = [];
@@ -582,26 +582,24 @@ export default function App() {
       // Merge base plate and walls into ONE single watertight volume
       const mergedSolidGeom = mergeGeometries(solidGeometries, false);
       if (!mergedSolidGeom) throw new Error("Failed to merge solid geometries");
+      
       let finalSolidMesh = new THREE.Mesh(mergedSolidGeom, new THREE.MeshStandardMaterial());
       finalSolidMesh.updateMatrixWorld();
 
-      // --- 2. SUBTRACT HOLES USING CSG ---
+      // --- 2. SUBTRACT HOLES ITERATIVELY ---
+      // CSG math prefers cutting with single, contiguous volumes. 
+      // We loop over the holes and subtract them one at a time.
       if (holes.length > 0) {
-        const holeGeometries: THREE.BufferGeometry[] = [];
-        holes.forEach(hole => {
+        for (let i = 0; i < holes.length; i++) {
+          const hole = holes[i];
           // Extra tall to ensure it completely blows through the floor and walls
           const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
           holeGeom.translate(hole.x, 0, hole.y);
-          holeGeometries.push(cleanForCSG(holeGeom));
-        });
-        
-        // Merge all holes into ONE single volume
-        const mergedHoleGeom = mergeGeometries(holeGeometries, false);
-        if (mergedHoleGeom) {
-          const holeMesh = new THREE.Mesh(mergedHoleGeom, new THREE.MeshStandardMaterial());
+          
+          const holeMesh = new THREE.Mesh(cleanForCSG(holeGeom), new THREE.MeshStandardMaterial());
           holeMesh.updateMatrixWorld();
           
-          // PERFORM SUBTRACTION 
+          // Replace the solid mesh with the new subtracted version
           finalSolidMesh = CSG.subtract(finalSolidMesh, holeMesh);
         }
       }
