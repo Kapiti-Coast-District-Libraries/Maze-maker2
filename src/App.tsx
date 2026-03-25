@@ -583,8 +583,18 @@ export default function App() {
       const mergedSolidGeom = mergeGeometries(solidGeometries, false);
       if (!mergedSolidGeom) throw new Error("Failed to merge solid geometries");
       
-      let finalSolidMesh = new THREE.Mesh(mergedSolidGeom, new THREE.MeshStandardMaterial());
-      finalSolidMesh.updateMatrixWorld();
+      let finalSolidMesh: THREE.Mesh | null = null;
+
+for (const geom of solidGeometries) {
+  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial());
+  mesh.updateMatrixWorld();
+
+  if (!finalSolidMesh) {
+    finalSolidMesh = mesh;
+  } else {
+    finalSolidMesh = CSG.union(finalSolidMesh, mesh);
+  }
+};
 
       // --- 2. SUBTRACT HOLES ITERATIVELY ---
       // CSG math prefers cutting with single, contiguous volumes. 
