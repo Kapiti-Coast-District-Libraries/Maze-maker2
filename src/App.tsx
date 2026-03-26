@@ -32,32 +32,52 @@ interface Hole {
   y: number;
 }
 
-// 🚀 BULLETPROOF CSG SANITIZER
-// Forces all geometries to speak the exact same WebGL language
+// 🚀 BULLETPROOF DE-INTERLEAVER & SANITIZER
+// GLTFs use InterleavedBufferAttributes which crash the CSG engine. 
+// This function forcefully rips the points out into standard flat arrays.
 const sanitizeForCSG = (geom: THREE.BufferGeometry) => {
-  const cleanGeom = geom.clone();
+  const cleanGeom = new THREE.BufferGeometry();
   
-  // 1. Remove incompatible attributes (keep only position and normal)
-  const allowedAttributes = ['position', 'normal'];
-  for (const key in cleanGeom.attributes) {
-    if (!allowedAttributes.includes(key)) {
-      cleanGeom.deleteAttribute(key);
-    }
+  // 1. Rip out Position Data
+  const posAttr = geom.getAttribute('position');
+  if (!posAttr) return null; // Safety check
+  
+  const posArray = new Float32Array(posAttr.count * 3);
+  for(let i = 0; i < posAttr.count; i++) {
+    posArray[i*3] = posAttr.getX(i);
+    posArray[i*3+1] = posAttr.getY(i);
+    posArray[i*3+2] = posAttr.getZ(i);
   }
-  
-  // 2. Ensure normal exists
-  if (!cleanGeom.attributes.normal) {
+  cleanGeom.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+
+  // 2. Rip out Normal Data (or generate it)
+  const normAttr = geom.getAttribute('normal');
+  if (normAttr) {
+    const normArray = new Float32Array(normAttr.count * 3);
+    for(let i = 0; i < normAttr.count; i++) {
+      normArray[i*3] = normAttr.getX(i);
+      normArray[i*3+1] = normAttr.getY(i);
+      normArray[i*3+2] = normAttr.getZ(i);
+    }
+    cleanGeom.setAttribute('normal', new THREE.BufferAttribute(normArray, 3));
+  } else {
     cleanGeom.computeVertexNormals();
   }
-  
-  // 3. Ensure index exists and is strictly a TypedArray
-  if (!cleanGeom.index) {
-    const count = cleanGeom.attributes.position.count;
-    const indices = new Uint32Array(count); // MUST be Uint32Array for BVH!
-    for (let i = 0; i < count; i++) {
-      indices[i] = i;
+
+  // 3. Rip out Index Data (or generate Triangle Soup index)
+  if (geom.index) {
+    const indexArray = new Uint32Array(geom.index.count);
+    for(let i = 0; i < geom.index.count; i++) {
+      indexArray[i] = geom.index.getX(i);
     }
-    cleanGeom.setIndex(new THREE.BufferAttribute(indices, 1));
+    cleanGeom.setIndex(new THREE.BufferAttribute(indexArray, 1));
+  } else {
+    const count = posAttr.count;
+    const indexArray = new Uint32Array(count);
+    for(let i = 0; i < count; i++) {
+      indexArray[i] = i;
+    }
+    cleanGeom.setIndex(new THREE.BufferAttribute(indexArray, 1));
   }
   
   return cleanGeom;
@@ -148,13 +168,18 @@ export default function App() {
     controls.dampingFactor = 0.05;
     controlsRef.current = controls;
 
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+    // Enhanced lighting so it never renders entirely black
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     scene.add(ambientLight);
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
     dirLight.position.set(100, 200, 100);
     dirLight.castShadow = true;
     scene.add(dirLight);
+
+    const dirLightFill = new THREE.DirectionalLight(0xffffff, 0.4);
+    dirLightFill.position.set(-100, 50, -100);
+    scene.add(dirLightFill);
 
     const gridHelper = new THREE.GridHelper(400, 80, 0xcccccc, 0xeeeeee);
     scene.add(gridHelper);
@@ -180,39 +205,37 @@ export default function App() {
     const gltfUrl = `${import.meta.env.BASE_URL}base.gltf`;
     
     loader.load(gltfUrl, (gltf) => {
-      let largestMesh: THREE.Mesh | null = null;
-      let maxVolume = 0;
+      let targetMesh: THREE.Mesh | null = null;
       
-      // Look for the LARGEST mesh to avoid picking up invisible points/cameras
+      // Grab the first mesh that actually has geometry data
       gltf.scene.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
+        if ((child as THREE.Mesh).isMesh && !targetMesh) {
           const m = child as THREE.Mesh;
-          m.geometry.computeBoundingBox();
-          const size = new THREE.Vector3();
-          m.geometry.boundingBox?.getSize(size);
-          const volume = size.x * size.y * size.z;
-          if (volume > maxVolume) {
-            maxVolume = volume;
-            largestMesh = m;
+          if (m.geometry && m.geometry.attributes.position && m.geometry.attributes.position.count > 0) {
+            targetMesh = m;
           }
         }
       });
 
-      if (largestMesh) {
-        let geometry = sanitizeForCSG(largestMesh.geometry);
-        
-        // CHECK SCALE: If it's smaller than 5 units, it was likely exported in Meters.
+      if (targetMesh) {
+        let geometry = sanitizeForCSG(targetMesh.geometry);
+        if (!geometry) {
+           console.error("Failed to sanitize geometry!");
+           return;
+        }
+
+        // CHECK SCALE: If it's smaller than 2 units, it was likely exported in Meters.
         // We scale it up 1000x to convert to Millimeters.
         geometry.computeBoundingBox();
         const initialSize = new THREE.Vector3();
         geometry.boundingBox?.getSize(initialSize);
-        if (initialSize.length() < 5) {
-          console.warn("Model seems extremely small (GLTF meter scale). Scaling up 1000x to Millimeters!");
+        if (Math.max(initialSize.x, initialSize.y, initialSize.z) < 2) {
+          console.log("Model seems extremely small (GLTF meter scale). Scaling up 1000x to Millimeters!");
           geometry.scale(1000, 1000, 1000);
           geometry.computeBoundingBox(); // Recompute after scaling
         }
 
-        // Use DoubleSide so it renders even if polygons are inside-out
+        // Use DoubleSide so it renders even if polygons are inside-out from the export
         const material = new THREE.MeshStandardMaterial({ 
           color: 0xaaaaaa, 
           flatShading: true,
@@ -220,7 +243,7 @@ export default function App() {
         });
         const mesh = new THREE.Mesh(geometry, material);
         
-        // Center the mesh
+        // Center the mesh onto the drawing plane
         const center = new THREE.Vector3();
         geometry.boundingBox?.getCenter(center);
         mesh.position.sub(center);
@@ -229,7 +252,7 @@ export default function App() {
         scene.add(mesh);
         setBaseMesh(mesh);
         
-        // Refocus Camera
+        // Refocus Camera specifically on this object
         const finalSize = new THREE.Vector3();
         geometry.boundingBox?.getSize(finalSize);
         const maxDim = Math.max(finalSize.x, finalSize.y, finalSize.z);
@@ -453,7 +476,7 @@ export default function App() {
     if (controlsRef.current) controlsRef.current.enabled = true;
   };
 
-  // STRAIGHTFORWARD EXPORT: No more Mould. Just direct subtraction!
+  // EXPORT: Utilizing our bulletproof sanitized geometry
   const exportSTL = async () => {
     if (!sceneRef.current) return;
     setIsExporting(true);
@@ -469,8 +492,8 @@ export default function App() {
       let currentBrush: Brush | null = null;
 
       if (baseMesh) {
-        console.log('Step 1: Cloning base geometry...');
-        // The base geometry was already sanitized perfectly on load!
+        console.log('Step 1: Constructing Brush from base geometry...');
+        // The base geometry was already flawlessly rebuilt on load!
         currentBrush = new Brush(baseMesh.geometry.clone(), new THREE.MeshStandardMaterial());
         currentBrush.position.copy(baseMesh.position);
         currentBrush.rotation.copy(baseMesh.rotation);
@@ -479,7 +502,7 @@ export default function App() {
       } else {
         // Fallback flat box if no mesh loaded
         let floorGeom = new THREE.BoxGeometry(100, 2, 100);
-        floorGeom = sanitizeForCSG(floorGeom); // Sanitize primitives too!
+        floorGeom = sanitizeForCSG(floorGeom) || floorGeom;
         currentBrush = new Brush(floorGeom, new THREE.MeshStandardMaterial());
         currentBrush.position.set(0, 1, 0);
         currentBrush.updateMatrixWorld();
@@ -489,7 +512,7 @@ export default function App() {
         console.log('Step 2: Drilling holes directly into the part...');
         for (const hole of holes) {
           let holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
-          holeGeom = sanitizeForCSG(holeGeom); // Sanitize primitives too!
+          holeGeom = sanitizeForCSG(holeGeom) || holeGeom; 
           
           const holeBrush = new Brush(holeGeom, new THREE.MeshStandardMaterial());
           holeBrush.position.set(hole.x, 0, hole.y);
@@ -501,7 +524,7 @@ export default function App() {
       }
 
       if (currentBrush) {
-        // Convert to nonIndexed at the end for STLExporter
+        // Convert to nonIndexed at the end just for STLExporter
         const finalGeom = currentBrush.geometry.toNonIndexed();
         finalGeom.clearGroups();
         finalGeom.computeVertexNormals();
