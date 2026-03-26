@@ -172,7 +172,7 @@ export default function App() {
 
     // Load default GLB file instead of STL
     const loader = new GLTFLoader();
-    const glbUrl = `${import.meta.env.BASE_URL}base.glb`;
+    const gltfUrl = `${import.meta.env.BASE_URL}base.gltf`; // Put your exact filename here!
     
     loader.load(glbUrl, (gltf) => {
       // Find the first mesh in the GLTF scene
