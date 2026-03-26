@@ -32,6 +32,37 @@ interface Hole {
   y: number;
 }
 
+// 🚀 BULLETPROOF CSG SANITIZER
+// Forces all geometries to speak the exact same WebGL language
+const sanitizeForCSG = (geom: THREE.BufferGeometry) => {
+  const cleanGeom = geom.clone();
+  
+  // 1. Remove incompatible attributes (keep only position and normal)
+  const allowedAttributes = ['position', 'normal'];
+  for (const key in cleanGeom.attributes) {
+    if (!allowedAttributes.includes(key)) {
+      cleanGeom.deleteAttribute(key);
+    }
+  }
+  
+  // 2. Ensure normal exists
+  if (!cleanGeom.attributes.normal) {
+    cleanGeom.computeVertexNormals();
+  }
+  
+  // 3. Ensure index exists and is strictly a TypedArray
+  if (!cleanGeom.index) {
+    const count = cleanGeom.attributes.position.count;
+    const indices = new Uint32Array(count); // MUST be Uint32Array for BVH!
+    for (let i = 0; i < count; i++) {
+      indices[i] = i;
+    }
+    cleanGeom.setIndex(new THREE.BufferAttribute(indices, 1));
+  }
+  
+  return cleanGeom;
+};
+
 export default function App() {
   const [baseMesh, setBaseMesh] = useState<THREE.Mesh | null>(null);
   const [walls, setWalls] = useState<Wall[]>([]);
@@ -75,38 +106,20 @@ export default function App() {
 
   const [debugInfo, setDebugInfo] = useState({ width: 0, height: 0, ready: false, frames: 0 });
 
-  // Handle OrbitControls configuration based on active tool
   useEffect(() => {
     if (!controlsRef.current) return;
     if (activeTool === 'draw' || activeTool === 'hole') {
-      controlsRef.current.mouseButtons = {
-        LEFT: null,
-        MIDDLE: THREE.MOUSE.PAN,
-        RIGHT: THREE.MOUSE.ROTATE
-      };
+      controlsRef.current.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
     } else {
-      controlsRef.current.mouseButtons = {
-        LEFT: THREE.MOUSE.ROTATE,
-        MIDDLE: THREE.MOUSE.PAN,
-        RIGHT: THREE.MOUSE.ROTATE
-      };
+      controlsRef.current.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
     }
   }, [activeTool]);
 
-  // Initialize Scene
   useEffect(() => {
     if (!containerRef.current) return;
 
     const container = containerRef.current;
-    
-    const updateDebug = () => {
-      setDebugInfo(prev => ({
-        ...prev,
-        width: container.clientWidth,
-        height: container.clientHeight,
-        ready: true
-      }));
-    };
+    const updateDebug = () => setDebugInfo(prev => ({ ...prev, width: container.clientWidth, height: container.clientHeight, ready: true }));
 
     container.innerHTML = '';
 
@@ -167,31 +180,47 @@ export default function App() {
     const gltfUrl = `${import.meta.env.BASE_URL}base.gltf`;
     
     loader.load(gltfUrl, (gltf) => {
-      let loadedMesh: THREE.Mesh | null = null;
+      let largestMesh: THREE.Mesh | null = null;
+      let maxVolume = 0;
       
-      // Look for the first mesh anywhere in the file
+      // Look for the LARGEST mesh to avoid picking up invisible points/cameras
       gltf.scene.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh && !loadedMesh) {
-          loadedMesh = child as THREE.Mesh;
+        if ((child as THREE.Mesh).isMesh) {
+          const m = child as THREE.Mesh;
+          m.geometry.computeBoundingBox();
+          const size = new THREE.Vector3();
+          m.geometry.boundingBox?.getSize(size);
+          const volume = size.x * size.y * size.z;
+          if (volume > maxVolume) {
+            maxVolume = volume;
+            largestMesh = m;
+          }
         }
       });
 
-      if (loadedMesh) {
-        const geometry = loadedMesh.geometry.clone();
+      if (largestMesh) {
+        let geometry = sanitizeForCSG(largestMesh.geometry);
         
-        // BULLETPROOF FIX: If the imported geometry has no index, force one!
-        if (!geometry.index) {
-          const indices = [];
-          for (let i = 0; i < geometry.attributes.position.count; i++) {
-            indices.push(i);
-          }
-          geometry.setIndex(indices);
+        // CHECK SCALE: If it's smaller than 5 units, it was likely exported in Meters.
+        // We scale it up 1000x to convert to Millimeters.
+        geometry.computeBoundingBox();
+        const initialSize = new THREE.Vector3();
+        geometry.boundingBox?.getSize(initialSize);
+        if (initialSize.length() < 5) {
+          console.warn("Model seems extremely small (GLTF meter scale). Scaling up 1000x to Millimeters!");
+          geometry.scale(1000, 1000, 1000);
+          geometry.computeBoundingBox(); // Recompute after scaling
         }
 
-        const material = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, flatShading: true });
+        // Use DoubleSide so it renders even if polygons are inside-out
+        const material = new THREE.MeshStandardMaterial({ 
+          color: 0xaaaaaa, 
+          flatShading: true,
+          side: THREE.DoubleSide
+        });
         const mesh = new THREE.Mesh(geometry, material);
         
-        geometry.computeBoundingBox();
+        // Center the mesh
         const center = new THREE.Vector3();
         geometry.boundingBox?.getCenter(center);
         mesh.position.sub(center);
@@ -200,11 +229,12 @@ export default function App() {
         scene.add(mesh);
         setBaseMesh(mesh);
         
-        const size = new THREE.Vector3();
-        geometry.boundingBox?.getSize(size);
-        const maxDim = Math.max(size.x, size.y, size.z);
-        camera.position.set(maxDim * 1.5, maxDim * 1.5, maxDim * 1.5);
-        controls.target.set(0, size.y / 2, 0);
+        // Refocus Camera
+        const finalSize = new THREE.Vector3();
+        geometry.boundingBox?.getSize(finalSize);
+        const maxDim = Math.max(finalSize.x, finalSize.y, finalSize.z);
+        camera.position.set(maxDim * 1.2, maxDim * 1.2, maxDim * 1.2);
+        controls.target.set(0, finalSize.y / 2, 0);
         controls.update();
       } else {
         alert("Could not find a valid 3D mesh inside the GLTF file.");
@@ -440,27 +470,16 @@ export default function App() {
 
       if (baseMesh) {
         console.log('Step 1: Cloning base geometry...');
-        const originalGeom = baseMesh.geometry.clone();
-        originalGeom.deleteAttribute('uv'); 
-        
-        // Ensure index exists for CSG engine before processing
-        if (!originalGeom.index) {
-          const indices = [];
-          for (let i = 0; i < originalGeom.attributes.position.count; i++) {
-            indices.push(i);
-          }
-          originalGeom.setIndex(indices);
-        }
-
-        currentBrush = new Brush(originalGeom, new THREE.MeshStandardMaterial());
+        // The base geometry was already sanitized perfectly on load!
+        currentBrush = new Brush(baseMesh.geometry.clone(), new THREE.MeshStandardMaterial());
         currentBrush.position.copy(baseMesh.position);
         currentBrush.rotation.copy(baseMesh.rotation);
         currentBrush.scale.copy(baseMesh.scale);
         currentBrush.updateMatrixWorld();
       } else {
         // Fallback flat box if no mesh loaded
-        const floorGeom = new THREE.BoxGeometry(100, 2, 100);
-        floorGeom.deleteAttribute('uv');
+        let floorGeom = new THREE.BoxGeometry(100, 2, 100);
+        floorGeom = sanitizeForCSG(floorGeom); // Sanitize primitives too!
         currentBrush = new Brush(floorGeom, new THREE.MeshStandardMaterial());
         currentBrush.position.set(0, 1, 0);
         currentBrush.updateMatrixWorld();
@@ -469,8 +488,9 @@ export default function App() {
       if (currentBrush && holes.length > 0) {
         console.log('Step 2: Drilling holes directly into the part...');
         for (const hole of holes) {
-          const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
-          holeGeom.deleteAttribute('uv');
+          let holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
+          holeGeom = sanitizeForCSG(holeGeom); // Sanitize primitives too!
+          
           const holeBrush = new Brush(holeGeom, new THREE.MeshStandardMaterial());
           holeBrush.position.set(hole.x, 0, hole.y);
           holeBrush.updateMatrixWorld();
@@ -481,6 +501,7 @@ export default function App() {
       }
 
       if (currentBrush) {
+        // Convert to nonIndexed at the end for STLExporter
         const finalGeom = currentBrush.geometry.toNonIndexed();
         finalGeom.clearGroups();
         finalGeom.computeVertexNormals();
