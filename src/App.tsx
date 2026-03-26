@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
-import { OrbitControls, STLLoader, STLExporter, mergeVertices } from 'three-stdlib';
-import { Evaluator, Brush, SUBTRACTION } from 'three-bvh-csg';
+import { OrbitControls, STLLoader, STLExporter } from 'three-stdlib';
+import { CSG } from 'three-csg-ts';
 import { 
   Download, 
   Trash2, 
@@ -549,25 +549,26 @@ export default function App() {
 
   const [isExporting, setIsExporting] = useState(false);
 
-const exportSTL = async () => {
+  const exportSTL = async () => {
     if (!sceneRef.current) return;
     setIsExporting(true);
     
-    // Small delay to allow UI to update
     await new Promise(resolve => setTimeout(resolve, 100));
 
     const exporter = new STLExporter();
+    const exportGroup = new THREE.Group();
     
     try {
-      console.log('Starting Slicer-ready Export...');
+      console.log('Starting STL Export with rebuild geometry...');
       
-      // --- 1. EXPORT SOLIDS (Base + Walls) ---
-      const solidsGroup = new THREE.Group();
+      let currentMesh: THREE.Mesh | null = null;
       
+      // 1. Prepare Base Mesh
       if (baseMesh) {
-        solidsGroup.add(baseMesh.clone());
+        currentMesh = baseMesh.clone();
+        currentMesh.updateMatrixWorld(true);
       } else if (holes.length > 0 || walls.length > 0) {
-        // Create default floor if no base is loaded
+        // Fallback Floor
         let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
         walls.forEach(w => {
           minX = Math.min(minX, w.start.x, w.end.x); maxX = Math.max(maxX, w.start.x, w.end.x);
@@ -579,60 +580,82 @@ const exportSTL = async () => {
         });
 
         const floorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
-        const floorMesh = new THREE.Mesh(floorGeom, new THREE.MeshStandardMaterial());
-        floorMesh.position.set((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
-        solidsGroup.add(floorMesh);
+        currentMesh = new THREE.Mesh(floorGeom, new THREE.MeshStandardMaterial());
+        currentMesh.position.set((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
+        currentMesh.updateMatrixWorld(true);
       }
-      
-      if (wallsGroupRef.current) {
-        solidsGroup.add(wallsGroupRef.current.clone());
-      }
-      
-      solidsGroup.updateMatrixWorld(true);
-      const solidsResult = exporter.parse(solidsGroup, { binary: true });
-      const solidsBlob = new Blob([solidsResult], { type: 'application/octet-stream' });
-      const solidsUrl = URL.createObjectURL(solidsBlob);
-      
-      const solidsLink = document.createElement('a');
-      solidsLink.href = solidsUrl;
-      solidsLink.download = 'maze_solids.stl';
-      solidsLink.click();
-      URL.revokeObjectURL(solidsUrl);
 
-      // --- 2. EXPORT HOLES (If any exist) ---
-      if (holes.length > 0) {
-        // Wait 500ms so the browser doesn't block the second consecutive download
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        const holesGroup = new THREE.Group();
-        holes.forEach(hole => {
-          // Create 200mm tall cylinders to ensure they cut all the way through
+      // 2. Subtract Holes using three-csg-ts
+      if (currentMesh && holes.length > 0) {
+        for (const hole of holes) {
           const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
-          const holeMesh = new THREE.Mesh(holeGeom, new THREE.MeshBasicMaterial());
+          const holeMesh = new THREE.Mesh(holeGeom, new THREE.MeshStandardMaterial());
           holeMesh.position.set(hole.x, 0, hole.y);
-          holesGroup.add(holeMesh);
-        });
-        
-        holesGroup.updateMatrixWorld(true);
-        const holesResult = exporter.parse(holesGroup, { binary: true });
-        const holesBlob = new Blob([holesResult], { type: 'application/octet-stream' });
-        const holesUrl = URL.createObjectURL(holesBlob);
-        
-        const holesLink = document.createElement('a');
-        holesLink.href = holesUrl;
-        holesLink.download = 'maze_holes_NEGATIVE_VOLUME.stl';
-        holesLink.click();
-        URL.revokeObjectURL(holesUrl);
+          holeMesh.updateMatrixWorld(true);
+          
+          currentMesh = CSG.subtract(currentMesh, holeMesh);
+        }
       }
+
+      // 3. Rebuild the geometry from scratch (bypasses STLExporter group bugs)
+      if (currentMesh) {
+        // toNonIndexed() shreds the geometry and builds a brand new raw triangle array
+        let finalGeom = currentMesh.geometry.toNonIndexed();
+        
+        // STLExporter gets confused by material groups left over from CSG, clear them
+        finalGeom.clearGroups();
+        finalGeom.computeVertexNormals();
+        
+        // Create a brand new, clean mesh for the exporter
+        const finalMesh = new THREE.Mesh(finalGeom, new THREE.MeshStandardMaterial());
+        
+        // Ensure its position matches wherever the math left it
+        finalMesh.position.copy(currentMesh.position);
+        finalMesh.rotation.copy(currentMesh.rotation);
+        finalMesh.scale.copy(currentMesh.scale);
+        finalMesh.updateMatrixWorld(true);
+        
+        exportGroup.add(finalMesh);
+      }
+      
+      // 4. Add walls
+      if (wallsGroupRef.current) {
+        exportGroup.add(wallsGroupRef.current.clone());
+      }
+      
+      exportGroup.updateMatrixWorld(true);
+      const result = exporter.parse(exportGroup, { binary: true });
+      const blob = new Blob([result], { type: 'application/octet-stream' });
+      
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'maze_output.stl';
+      link.click();
       
     } catch (error) {
-      console.error('Export Error:', error);
+      console.error('CSG Export Error:', error);
       alert('Error during export check console.');
+      
+      // Fallback: simple group export
+      const fallbackGroup = new THREE.Group();
+      if (baseMesh) fallbackGroup.add(baseMesh.clone());
+      if (wallsGroupRef.current) fallbackGroup.add(wallsGroupRef.current.clone());
+      
+      fallbackGroup.updateMatrixWorld(true);
+      const fallbackExporter = new STLExporter();
+      const result = fallbackExporter.parse(fallbackGroup, { binary: true });
+      const blob = new Blob([result], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'maze_output_fallback.stl';
+      link.click();
+      URL.revokeObjectURL(url);
     } finally {
       setIsExporting(false);
     }
   };
-  
+
   return (
     <div className="flex flex-col h-screen bg-white font-sans text-neutral-900 overflow-hidden">
       {/* Header */}
