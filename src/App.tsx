@@ -559,29 +559,54 @@ export default function App() {
     const exportGroup = new THREE.Group();
 
     try {
-      console.log('Starting Primitive Replacement CSG Export...');
+      console.log('Starting Mold & Cast CSG Export...');
       let currentBrush: Brush | null = null;
+      const evaluator = new Evaluator();
+      evaluator.useGroups = false;
       
-      // 1. Create a brand new Box based on the bounds of the original file
-      // This completely bypasses any messy mesh data in the original STL!
       if (baseMesh) {
-        console.log('Creating a new replacement part based on base mesh dimensions...');
-        // Measure the exact visual bounds of the imported part
+        console.log('Step 1: Reading original base shape...');
+        const originalGeom = baseMesh.geometry.clone();
+        originalGeom.computeVertexNormals();
+        
+        const originalBrush = new Brush(originalGeom, new THREE.MeshStandardMaterial());
+        originalBrush.position.copy(baseMesh.position);
+        originalBrush.rotation.copy(baseMesh.rotation);
+        originalBrush.scale.copy(baseMesh.scale);
+        originalBrush.updateMatrixWorld();
+
+        console.log('Step 2: Creating the Mould...');
+        // Measure exact bounds to create the perfect mould box
         const box3 = new THREE.Box3().setFromObject(baseMesh);
         const size = new THREE.Vector3();
         box3.getSize(size);
         const center = new THREE.Vector3();
         box3.getCenter(center);
 
-        // Generate a mathematically perfect, fresh BoxGeometry to act as our base
-        const replacementGeom = new THREE.BoxGeometry(size.x, size.y, size.z);
-        currentBrush = new Brush(replacementGeom, new THREE.MeshStandardMaterial());
+        // Make the mould slightly larger than the object
+        const moldGeom = new THREE.BoxGeometry(size.x + 2, size.y + 2, size.z + 2);
         
-        // Position it exactly where the original visual center was
-        currentBrush.position.copy(center);
+        const moldBlock1 = new Brush(moldGeom, new THREE.MeshStandardMaterial());
+        moldBlock1.position.copy(center);
+        moldBlock1.updateMatrixWorld();
+
+        const moldBlock2 = new Brush(moldGeom.clone(), new THREE.MeshStandardMaterial());
+        moldBlock2.position.copy(center);
+        moldBlock2.updateMatrixWorld();
+
+        // Create the negative mold (Block - Original)
+        const negativeMold = evaluator.evaluate(moldBlock1, originalBrush, SUBTRACTION);
+        negativeMold.updateMatrixWorld();
+
+        console.log('Step 3: Casting a completely new replacement part...');
+        // Create the perfect positive clone (Block - Negative)
+        // This forces the engine to build brand new, mathematically perfect polygons
+        // in the exact shape of your original features!
+        currentBrush = evaluator.evaluate(moldBlock2, negativeMold, SUBTRACTION);
         currentBrush.updateMatrixWorld();
+        
       } else if (holes.length > 0 || walls.length > 0) {
-        // Fallback Floor
+        // Fallback Floor (if no STL is loaded)
         let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
         walls.forEach(w => {
           minX = Math.min(minX, w.start.x, w.end.x); maxX = Math.max(maxX, w.start.x, w.end.x);
@@ -598,25 +623,21 @@ export default function App() {
         currentBrush.updateMatrixWorld();
       }
 
-      // 2. Subtract Holes
+      // 4. Subtract Holes
       if (currentBrush && holes.length > 0) {
-        const evaluator = new Evaluator();
-        evaluator.useGroups = false;
-        
+        console.log('Step 4: Drilling holes into the new pristine part...');
         for (const hole of holes) {
           const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
           const holeBrush = new Brush(holeGeom, new THREE.MeshStandardMaterial());
-          // Position hole exactly where it should be
           holeBrush.position.set(hole.x, 0, hole.y);
           holeBrush.updateMatrixWorld();
           
-          // Subtract the hole from the mathematically perfect base
           currentBrush = evaluator.evaluate(currentBrush, holeBrush, SUBTRACTION);
           currentBrush.updateMatrixWorld();
         }
       }
 
-      // 3. Prep the final cut object for export
+      // 5. Prep the final cut object for export
       if (currentBrush) {
         const finalGeom = currentBrush.geometry.toNonIndexed();
         finalGeom.clearGroups();
@@ -626,7 +647,7 @@ export default function App() {
         exportGroup.add(finalMesh);
       }
       
-      // 4. Add the walls
+      // 6. Add the walls
       if (wallsGroupRef.current) {
         exportGroup.add(wallsGroupRef.current.clone());
       }
@@ -637,7 +658,7 @@ export default function App() {
       
       const link = document.createElement('a');
       link.href = URL.createObjectURL(blob);
-      link.download = 'maze_output_with_holes.stl';
+      link.download = 'maze_with_perfect_features.stl';
       link.click();
       
     } catch (error) {
