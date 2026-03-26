@@ -170,11 +170,10 @@ export default function App() {
     scene.add(holesGroup);
     holesGroupRef.current = holesGroup;
 
-// Load default GLTF file
+    // Load default GLTF file
     const loader = new GLTFLoader();
-    const gltfUrl = `${import.meta.env.BASE_URL}base.gltf`; // We create the variable here...
+    const gltfUrl = `${import.meta.env.BASE_URL}base.gltf`;
     
-    // ...and we MUST use the exact same variable name here! 👇
     loader.load(gltfUrl, (gltf) => {
       // Find the first mesh in the GLTF scene
       let loadedMesh: THREE.Mesh | null = null;
@@ -210,8 +209,7 @@ export default function App() {
         controls.update();
       }
     }, undefined, (error) => {
-      console.error('Error loading base.glb:', error);
-      alert("Please ensure you have placed a 'base.glb' file in your public folder!");
+      console.error('Error loading base.gltf:', error);
     });
 
     // Animation Loop
@@ -546,21 +544,6 @@ export default function App() {
     if (controlsRef.current) controlsRef.current.enabled = true;
   };
 
-  // Keyboard Listeners
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.key === 'Delete' || e.key === 'Backspace') && (selectedHoleId || selectedWallId)) {
-        deleteSelected();
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
-        e.preventDefault();
-        undo();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedHoleId, selectedWallId, history]);
-
   const [isExporting, setIsExporting] = useState(false);
 
   const exportSTL = async () => {
@@ -687,6 +670,22 @@ export default function App() {
       setIsExporting(false);
     }
   };
+
+  // Keyboard Listeners (placed below exportSTL so it has access to state if needed)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && (selectedHoleId || selectedWallId)) {
+        deleteSelected();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        undo();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedHoleId, selectedWallId, history]);
+
 
   return (
     <div className="flex flex-col h-screen bg-white font-sans text-neutral-900 overflow-hidden">
