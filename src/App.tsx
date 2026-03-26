@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
-import { OrbitControls, STLLoader, STLExporter } from 'three-stdlib';
+import { OrbitControls, GLTFLoader, STLExporter } from 'three-stdlib';
 import { Brush, Evaluator, SUBTRACTION } from 'three-bvh-csg';
 import { 
   Download, 
@@ -170,34 +170,47 @@ export default function App() {
     scene.add(holesGroup);
     holesGroupRef.current = holesGroup;
 
-    // Load default STL file
-    const loader = new STLLoader();
-    const stlUrl = `${import.meta.env.BASE_URL}base.stl`;
+    // Load default GLB file instead of STL
+    const loader = new GLTFLoader();
+    const glbUrl = `${import.meta.env.BASE_URL}base.glb`;
     
-    loader.load(stlUrl, (geometry) => {
-      const material = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, flatShading: true });
-      const mesh = new THREE.Mesh(geometry, material);
-      
-      // Center the mesh
-      geometry.computeBoundingBox();
-      const center = new THREE.Vector3();
-      geometry.boundingBox?.getCenter(center);
-      mesh.position.sub(center);
-      // Ensure it sits on the ground
-      mesh.position.y = - (geometry.boundingBox?.min.y || 0);
+    loader.load(glbUrl, (gltf) => {
+      // Find the first mesh in the GLTF scene
+      let loadedMesh: THREE.Mesh | null = null;
+      gltf.scene.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh && !loadedMesh) {
+          loadedMesh = child as THREE.Mesh;
+        }
+      });
 
-      scene.add(mesh);
-      setBaseMesh(mesh);
-      
-      // Adjust camera to fit
-      const size = new THREE.Vector3();
-      geometry.boundingBox?.getSize(size);
-      const maxDim = Math.max(size.x, size.y, size.z);
-      camera.position.set(maxDim * 1.5, maxDim * 1.5, maxDim * 1.5);
-      controls.target.set(0, size.y / 2, 0);
-      controls.update();
+      if (loadedMesh) {
+        const geometry = loadedMesh.geometry.clone();
+        const material = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, flatShading: true });
+        const mesh = new THREE.Mesh(geometry, material);
+        
+        // Center the mesh
+        geometry.computeBoundingBox();
+        const center = new THREE.Vector3();
+        geometry.boundingBox?.getCenter(center);
+        mesh.position.sub(center);
+        
+        // Ensure it sits on the ground
+        mesh.position.y = - (geometry.boundingBox?.min.y || 0);
+
+        scene.add(mesh);
+        setBaseMesh(mesh);
+        
+        // Adjust camera to fit
+        const size = new THREE.Vector3();
+        geometry.boundingBox?.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        camera.position.set(maxDim * 1.5, maxDim * 1.5, maxDim * 1.5);
+        controls.target.set(0, size.y / 2, 0);
+        controls.update();
+      }
     }, undefined, (error) => {
-      console.error('Error loading base.stl:', error);
+      console.error('Error loading base.glb:', error);
+      alert("Please ensure you have placed a 'base.glb' file in your public folder!");
     });
 
     // Animation Loop
@@ -548,8 +561,8 @@ export default function App() {
   }, [selectedHoleId, selectedWallId, history]);
 
   const [isExporting, setIsExporting] = useState(false);
-  
-const exportSTL = async () => {
+
+  const exportSTL = async () => {
     if (!sceneRef.current) return;
     setIsExporting(true);
     
@@ -568,8 +581,7 @@ const exportSTL = async () => {
         console.log('Step 1: Reading original base shape...');
         const originalGeom = baseMesh.geometry.clone();
         
-        // FIX: Strip UVs to match Three.js primitives, or vice versa. 
-        // We'll strip them from everything just to be safe.
+        // Strip UVs in case the GLTF had them, so it perfectly matches our BoxGeometry
         originalGeom.deleteAttribute('uv'); 
         originalGeom.computeVertexNormals();
         
@@ -586,8 +598,8 @@ const exportSTL = async () => {
         const center = new THREE.Vector3();
         box3.getCenter(center);
 
+        // Natively indexed BoxGeometry
         const moldGeom = new THREE.BoxGeometry(size.x + 2, size.y + 2, size.z + 2);
-        // FIX: Delete UVs from the generated primitive so it matches the STL
         moldGeom.deleteAttribute('uv');
         
         const moldBlock1 = new Brush(moldGeom, new THREE.MeshStandardMaterial());
@@ -619,7 +631,6 @@ const exportSTL = async () => {
         });
 
         const floorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
-        // FIX: Delete UVs
         floorGeom.deleteAttribute('uv');
         
         currentBrush = new Brush(floorGeom, new THREE.MeshStandardMaterial());
@@ -632,7 +643,6 @@ const exportSTL = async () => {
         console.log('Step 4: Drilling holes into the new pristine part...');
         for (const hole of holes) {
           const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
-          // FIX: Delete UVs here too!
           holeGeom.deleteAttribute('uv');
           
           const holeBrush = new Brush(holeGeom, new THREE.MeshStandardMaterial());
@@ -646,6 +656,7 @@ const exportSTL = async () => {
 
       // 5. Prep the final cut object for export
       if (currentBrush) {
+        // We convert to nonIndexed at the very end just for the STLExporter
         const finalGeom = currentBrush.geometry.toNonIndexed();
         finalGeom.clearGroups();
         finalGeom.computeVertexNormals();
@@ -675,7 +686,7 @@ const exportSTL = async () => {
       setIsExporting(false);
     }
   };
-  
+
   return (
     <div className="flex flex-col h-screen bg-white font-sans text-neutral-900 overflow-hidden">
       {/* Header */}
