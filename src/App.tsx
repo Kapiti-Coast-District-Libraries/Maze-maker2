@@ -558,15 +558,38 @@ export default function App() {
     const exporter = new STLExporter();
     const exportGroup = new THREE.Group();
     
+    // THE ATOMIC REBUILDER: Destroys the original object and builds a new one from scratch
+    const buildPerfectGeometry = (sourceGeometry: THREE.BufferGeometry) => {
+      // 1. Create a brand new, empty geometry
+      const perfectGeom = new THREE.BufferGeometry();
+      
+      // 2. Extract ONLY the raw X,Y,Z positions from the source
+      const positions = sourceGeometry.getAttribute('position').clone();
+      perfectGeom.setAttribute('position', positions);
+      
+      // 3. Force Three.js to stitch the raw coordinates together into a solid mathematical object
+      const mergedGeom = mergeVertices(perfectGeom, 1e-4);
+      
+      // 4. Generate fresh, perfect surface normals
+      mergedGeom.computeVertexNormals();
+      
+      return mergedGeom;
+    };
+
     try {
-      console.log('Starting STL Export with rebuild geometry...');
+      console.log('Starting Atomic Rebuild CSG Export...');
+      let currentBrush: Brush | null = null;
       
-      let currentMesh: THREE.Mesh | null = null;
-      
-      // 1. Prepare Base Mesh
+      // 1. Rebuild the Base Mesh
       if (baseMesh) {
-        currentMesh = baseMesh.clone();
-        currentMesh.updateMatrixWorld(true);
+        console.log('Rebuilding base geometry from raw coordinates...');
+        const perfectBaseGeom = buildPerfectGeometry(baseMesh.geometry);
+        
+        currentBrush = new Brush(perfectBaseGeom, new THREE.MeshStandardMaterial());
+        currentBrush.position.copy(baseMesh.position);
+        currentBrush.rotation.copy(baseMesh.rotation);
+        currentBrush.scale.copy(baseMesh.scale);
+        currentBrush.updateMatrixWorld();
       } else if (holes.length > 0 || walls.length > 0) {
         // Fallback Floor
         let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
@@ -579,46 +602,47 @@ export default function App() {
           minZ = Math.min(minZ, h.y - 10); maxZ = Math.max(maxZ, h.y + 10);
         });
 
-        const floorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
-        currentMesh = new THREE.Mesh(floorGeom, new THREE.MeshStandardMaterial());
-        currentMesh.position.set((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
-        currentMesh.updateMatrixWorld(true);
+        const rawFloorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
+        const perfectFloorGeom = buildPerfectGeometry(rawFloorGeom);
+        
+        currentBrush = new Brush(perfectFloorGeom, new THREE.MeshStandardMaterial());
+        currentBrush.position.set((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
+        currentBrush.updateMatrixWorld();
       }
 
-      // 2. Subtract Holes using three-csg-ts
-      if (currentMesh && holes.length > 0) {
+      // 2. Rebuild and Subtract Holes
+      if (currentBrush && holes.length > 0) {
+        const evaluator = new Evaluator();
+        evaluator.useGroups = false; // CRITICAL: Stops it from splitting the model into pieces
+        
         for (const hole of holes) {
-          const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
-          const holeMesh = new THREE.Mesh(holeGeom, new THREE.MeshStandardMaterial());
-          holeMesh.position.set(hole.x, 0, hole.y);
-          holeMesh.updateMatrixWorld(true);
+          const rawHoleGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
           
-          currentMesh = CSG.subtract(currentMesh, holeMesh);
+          // Force the hole to go through the exact same atomic rebuild as the base
+          const perfectHoleGeom = buildPerfectGeometry(rawHoleGeom);
+          
+          const holeBrush = new Brush(perfectHoleGeom, new THREE.MeshStandardMaterial());
+          holeBrush.position.set(hole.x, 0, hole.y);
+          holeBrush.updateMatrixWorld();
+          
+          // Now that both objects have identical, freshly generated structures, cut them
+          currentBrush = evaluator.evaluate(currentBrush, holeBrush, SUBTRACTION);
+          currentBrush.updateMatrixWorld();
         }
       }
 
-      // 3. Rebuild the geometry from scratch (bypasses STLExporter group bugs)
-      if (currentMesh) {
-        // toNonIndexed() shreds the geometry and builds a brand new raw triangle array
-        let finalGeom = currentMesh.geometry.toNonIndexed();
-        
-        // STLExporter gets confused by material groups left over from CSG, clear them
+      // 3. Prep the final cut object for export
+      if (currentBrush) {
+        // Shred it one last time to remove any CSG artifacts before exporting
+        const finalGeom = currentBrush.geometry.toNonIndexed();
         finalGeom.clearGroups();
         finalGeom.computeVertexNormals();
         
-        // Create a brand new, clean mesh for the exporter
         const finalMesh = new THREE.Mesh(finalGeom, new THREE.MeshStandardMaterial());
-        
-        // Ensure its position matches wherever the math left it
-        finalMesh.position.copy(currentMesh.position);
-        finalMesh.rotation.copy(currentMesh.rotation);
-        finalMesh.scale.copy(currentMesh.scale);
-        finalMesh.updateMatrixWorld(true);
-        
         exportGroup.add(finalMesh);
       }
       
-      // 4. Add walls
+      // 4. Add the walls
       if (wallsGroupRef.current) {
         exportGroup.add(wallsGroupRef.current.clone());
       }
@@ -629,28 +653,12 @@ export default function App() {
       
       const link = document.createElement('a');
       link.href = URL.createObjectURL(blob);
-      link.download = 'maze_output.stl';
+      link.download = 'maze_output_with_holes.stl';
       link.click();
       
     } catch (error) {
       console.error('CSG Export Error:', error);
       alert('Error during export check console.');
-      
-      // Fallback: simple group export
-      const fallbackGroup = new THREE.Group();
-      if (baseMesh) fallbackGroup.add(baseMesh.clone());
-      if (wallsGroupRef.current) fallbackGroup.add(wallsGroupRef.current.clone());
-      
-      fallbackGroup.updateMatrixWorld(true);
-      const fallbackExporter = new STLExporter();
-      const result = fallbackExporter.parse(fallbackGroup, { binary: true });
-      const blob = new Blob([result], { type: 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = 'maze_output_fallback.stl';
-      link.click();
-      URL.revokeObjectURL(url);
     } finally {
       setIsExporting(false);
     }
