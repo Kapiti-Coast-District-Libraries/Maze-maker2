@@ -548,8 +548,8 @@ export default function App() {
   }, [selectedHoleId, selectedWallId, history]);
 
   const [isExporting, setIsExporting] = useState(false);
-
-  const exportSTL = async () => {
+  
+const exportSTL = async () => {
     if (!sceneRef.current) return;
     setIsExporting(true);
     
@@ -567,6 +567,10 @@ export default function App() {
       if (baseMesh) {
         console.log('Step 1: Reading original base shape...');
         const originalGeom = baseMesh.geometry.clone();
+        
+        // FIX: Strip UVs to match Three.js primitives, or vice versa. 
+        // We'll strip them from everything just to be safe.
+        originalGeom.deleteAttribute('uv'); 
         originalGeom.computeVertexNormals();
         
         const originalBrush = new Brush(originalGeom, new THREE.MeshStandardMaterial());
@@ -576,15 +580,15 @@ export default function App() {
         originalBrush.updateMatrixWorld();
 
         console.log('Step 2: Creating the Mould...');
-        // Measure exact bounds to create the perfect mould box
         const box3 = new THREE.Box3().setFromObject(baseMesh);
         const size = new THREE.Vector3();
         box3.getSize(size);
         const center = new THREE.Vector3();
         box3.getCenter(center);
 
-        // Make the mould slightly larger than the object
         const moldGeom = new THREE.BoxGeometry(size.x + 2, size.y + 2, size.z + 2);
+        // FIX: Delete UVs from the generated primitive so it matches the STL
+        moldGeom.deleteAttribute('uv');
         
         const moldBlock1 = new Brush(moldGeom, new THREE.MeshStandardMaterial());
         moldBlock1.position.copy(center);
@@ -599,14 +603,11 @@ export default function App() {
         negativeMold.updateMatrixWorld();
 
         console.log('Step 3: Casting a completely new replacement part...');
-        // Create the perfect positive clone (Block - Negative)
-        // This forces the engine to build brand new, mathematically perfect polygons
-        // in the exact shape of your original features!
         currentBrush = evaluator.evaluate(moldBlock2, negativeMold, SUBTRACTION);
         currentBrush.updateMatrixWorld();
         
       } else if (holes.length > 0 || walls.length > 0) {
-        // Fallback Floor (if no STL is loaded)
+        // Fallback Floor
         let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
         walls.forEach(w => {
           minX = Math.min(minX, w.start.x, w.end.x); maxX = Math.max(maxX, w.start.x, w.end.x);
@@ -618,6 +619,9 @@ export default function App() {
         });
 
         const floorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
+        // FIX: Delete UVs
+        floorGeom.deleteAttribute('uv');
+        
         currentBrush = new Brush(floorGeom, new THREE.MeshStandardMaterial());
         currentBrush.position.set((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
         currentBrush.updateMatrixWorld();
@@ -628,6 +632,9 @@ export default function App() {
         console.log('Step 4: Drilling holes into the new pristine part...');
         for (const hole of holes) {
           const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
+          // FIX: Delete UVs here too!
+          holeGeom.deleteAttribute('uv');
+          
           const holeBrush = new Brush(holeGeom, new THREE.MeshStandardMaterial());
           holeBrush.position.set(hole.x, 0, hole.y);
           holeBrush.updateMatrixWorld();
@@ -668,7 +675,7 @@ export default function App() {
       setIsExporting(false);
     }
   };
-
+  
   return (
     <div className="flex flex-col h-screen bg-white font-sans text-neutral-900 overflow-hidden">
       {/* Header */}
