@@ -170,11 +170,12 @@ export default function App() {
     scene.add(holesGroup);
     holesGroupRef.current = holesGroup;
 
-    // Load default GLB file instead of STL
+// Load default GLTF file
     const loader = new GLTFLoader();
-    const gltfUrl = `${import.meta.env.BASE_URL}base.gltf`; // Put your exact filename here!
+    const gltfUrl = `${import.meta.env.BASE_URL}base.gltf`; // We create the variable here...
     
-    loader.load(glbUrl, (gltf) => {
+    // ...and we MUST use the exact same variable name here! 👇
+    loader.load(gltfUrl, (gltf) => {
       // Find the first mesh in the GLTF scene
       let loadedMesh: THREE.Mesh | null = null;
       gltf.scene.traverse((child) => {
