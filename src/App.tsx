@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
-import { OrbitControls, STLLoader, STLExporter, mergeVertices, mergeBufferGeometries as mergeGeometries } from 'three-stdlib';
-import { CSG } from 'three-csg-ts';
+import { OrbitControls, STLLoader, STLExporter, mergeBufferGeometries as mergeGeometries } from 'three-stdlib';
 import { 
   Download, 
   Trash2, 
@@ -575,7 +574,6 @@ export default function App() {
       const exportGroup = new THREE.Group();
 
       // Merge base plate and walls into ONE single structure
-      // Slicers handle intersecting positive geometry natively, so simple merge is fine and MUCH faster/more reliable than CSG
       const mergedSolidGeom = mergeGeometries(solidGeometries, false);
       if (!mergedSolidGeom) throw new Error("Failed to merge solid geometries");
       
@@ -596,56 +594,6 @@ export default function App() {
       }
       
       // --- 3. EXPORT FINAL MESH ---
-      const stlResult = exporter.parse(exportGroup, { binary: true });
-      const stlBlob = new Blob([stlResult], { type: 'application/octet-stream' });
-      const stlUrl = URL.createObjectURL(stlBlob);
-      
-      const link = document.createElement('a');
-      link.href = stlUrl;
-      link.download = 'maze_architect_export.stl';
-      link.click();
-      URL.revokeObjectURL(stlUrl);
-      
-      console.log('Export Complete!');
-    } catch (error) {
-      console.error('Export Error:', error);
-      alert('Error during export. Check the console for details.');
-    } finally {
-      setIsExporting(false);
-    }
-  };
-
-      // --- 2. SUBTRACT HOLES ITERATIVELY ---
-      // CSG math prefers cutting with single, contiguous volumes. 
-      // We loop over the holes and subtract them one at a time.
-      if (holes.length > 0) {
-        for (let i = 0; i < holes.length; i++) {
-          const hole = holes[i];
-          // Extra tall to ensure it completely blows through the floor and walls
-          const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
-          holeGeom.translate(hole.x, 0, hole.y);
-          
-          const holeMesh = new THREE.Mesh(cleanForCSG(holeGeom), new THREE.MeshStandardMaterial());
-          holeMesh.updateMatrixWorld();
-          
-          // Replace the solid mesh with the new subtracted version
-          finalSolidMesh = CSG.subtract(finalSolidMesh, holeMesh);
-        }
-      }
-      
-      // --- 3. EXPORT FINAL MESH ---
-      const exportGroup = new THREE.Group();
-      
-      // Convert to non-indexed one final time to prevent STLExporter from getting confused
-      let exportGeom = finalSolidMesh.geometry.clone();
-      if (exportGeom.index) {
-        exportGeom = exportGeom.toNonIndexed();
-      }
-      exportGeom.computeVertexNormals();
-      
-      const exportMesh = new THREE.Mesh(exportGeom, new THREE.MeshStandardMaterial());
-      exportGroup.add(exportMesh);
-      
       const stlResult = exporter.parse(exportGroup, { binary: true });
       const stlBlob = new Blob([stlResult], { type: 'application/octet-stream' });
       const stlUrl = URL.createObjectURL(stlBlob);
