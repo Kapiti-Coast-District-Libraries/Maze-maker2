@@ -9,7 +9,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
   return {
-    base: '/Maze-maker2/',
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
