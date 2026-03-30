@@ -516,28 +516,21 @@ export default function App() {
 
     const exporter = new STLExporter();
 
-    // HELPER: Safely prepares geometries for merging and CSG math. 
-    // It strips non-essential attributes and, crucially, fuses the raw triangle soup into a solid volume.
-    const cleanForCSG = (geom: THREE.BufferGeometry) => {
+    // HELPER: Safely prepares geometries for merging by stripping non-essential attributes
+    const cleanGeometry = (geom: THREE.BufferGeometry) => {
       let cleaned = geom.clone();
       
-      // Strip everything except position to prevent mergeGeometries from failing 
       for (const key in cleaned.attributes) {
         if (key !== 'position') {
           cleaned.deleteAttribute(key);
         }
       }
       cleaned.clearGroups();
-
-      // Merge vertices to fix non-manifold geometry (Triangle soup to solid)
-      cleaned = mergeVertices(cleaned, 1e-4);
-      cleaned.computeVertexNormals();
-
       return cleaned;
     };
     
     try {
-      console.log('Starting iterative CSG Subtraction...');
+      console.log('Gathering geometries for export...');
       
       // --- 1. GATHER ALL SOLIDS ---
       const solidGeometries: THREE.BufferGeometry[] = [];
@@ -545,7 +538,7 @@ export default function App() {
       if (baseMesh) {
         const geom = baseMesh.geometry.clone();
         geom.applyMatrix4(baseMesh.matrixWorld);
-        solidGeometries.push(cleanForCSG(geom));
+        solidGeometries.push(cleanGeometry(geom));
       } else if (holes.length > 0 || walls.length > 0) {
         let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
         walls.forEach(w => {
@@ -559,7 +552,7 @@ export default function App() {
 
         const floorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
         floorGeom.translate((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
-        solidGeometries.push(cleanForCSG(floorGeom));
+        solidGeometries.push(cleanGeometry(floorGeom));
       }
       
       if (wallsGroupRef.current) {
@@ -568,7 +561,7 @@ export default function App() {
             const geom = child.geometry.clone();
             child.updateWorldMatrix(true, false);
             geom.applyMatrix4(child.matrixWorld);
-            solidGeometries.push(cleanForCSG(geom));
+            solidGeometries.push(cleanGeometry(geom));
           }
         });
       }
@@ -579,22 +572,48 @@ export default function App() {
         return;
       }
       
-      // Merge base plate and walls into ONE single watertight volume
+      const exportGroup = new THREE.Group();
+
+      // Merge base plate and walls into ONE single structure
+      // Slicers handle intersecting positive geometry natively, so simple merge is fine and MUCH faster/more reliable than CSG
       const mergedSolidGeom = mergeGeometries(solidGeometries, false);
       if (!mergedSolidGeom) throw new Error("Failed to merge solid geometries");
       
-      let finalSolidMesh: THREE.Mesh | null = null;
-
-for (const geom of solidGeometries) {
-  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial());
-  mesh.updateMatrixWorld();
-
-  if (!finalSolidMesh) {
-    finalSolidMesh = mesh;
-  } else {
-    finalSolidMesh = CSG.union(finalSolidMesh, mesh);
-  }
-};
+      const finalSolidMesh = new THREE.Mesh(mergedSolidGeom, new THREE.MeshStandardMaterial());
+      exportGroup.add(finalSolidMesh);
+      
+      // --- 2. ADD HOLES AS SEPARATE SHAPES ---
+      if (holes.length > 0) {
+        for (let i = 0; i < holes.length; i++) {
+          const hole = holes[i];
+          // Extra tall to ensure it completely blows through the floor and walls
+          const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
+          holeGeom.translate(hole.x, 0, hole.y);
+          
+          const holeMesh = new THREE.Mesh(cleanGeometry(holeGeom), new THREE.MeshStandardMaterial());
+          exportGroup.add(holeMesh);
+        }
+      }
+      
+      // --- 3. EXPORT FINAL MESH ---
+      const stlResult = exporter.parse(exportGroup, { binary: true });
+      const stlBlob = new Blob([stlResult], { type: 'application/octet-stream' });
+      const stlUrl = URL.createObjectURL(stlBlob);
+      
+      const link = document.createElement('a');
+      link.href = stlUrl;
+      link.download = 'maze_architect_export.stl';
+      link.click();
+      URL.revokeObjectURL(stlUrl);
+      
+      console.log('Export Complete!');
+    } catch (error) {
+      console.error('Export Error:', error);
+      alert('Error during export. Check the console for details.');
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
       // --- 2. SUBTRACT HOLES ITERATIVELY ---
       // CSG math prefers cutting with single, contiguous volumes. 
