@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls, STLLoader, STLExporter, mergeBufferGeometries as mergeGeometries } from 'three-stdlib';
-import { CSG } from 'three-csg-ts';
 import { 
   Download, 
   Trash2, 
@@ -511,23 +510,18 @@ export default function App() {
     if (!sceneRef.current) return;
     setIsExporting(true);
     
-    // Small delay to allow UI to update
-    await new Promise(resolve => setTimeout(resolve, 100));
+    // Small delay to allow UI to update to "Processing..."
+    await new Promise(resolve => setTimeout(resolve, 50));
 
     const exporter = new STLExporter();
 
-    // HELPER: Safely prepares geometries for merging and CSG operations
+    // HELPER: Prepares geometries for merging by stripping out non-indexed issues
     const cleanGeometry = (geom: THREE.BufferGeometry) => {
       let cleaned = geom.clone();
       
-      // CRITICAL FIX: Convert everything to non-indexed so Three.js can merge 
-      // the imported STL (non-indexed) with the drawn walls (indexed)
       if (cleaned.index) {
         cleaned = cleaned.toNonIndexed();
       }
-      
-      // Calculate normals necessary for clean CSG boolean math
-      cleaned.computeVertexNormals();
       
       for (const key in cleaned.attributes) {
         if (key !== 'position' && key !== 'normal') {
@@ -541,35 +535,24 @@ export default function App() {
     try {
       console.log('Gathering geometries for export...');
       
-      // --- 1. PREPARE THE BASE MESH ---
-      let finalSolidMesh: THREE.Mesh;
+      // --- 1. GATHER SOLIDS TO MERGE (BASE + WALLS) ---
+      const solidGeometries: THREE.BufferGeometry[] = [];
       
       if (baseMesh) {
         const geom = baseMesh.geometry.clone();
         geom.applyMatrix4(baseMesh.matrixWorld);
-        finalSolidMesh = new THREE.Mesh(cleanGeometry(geom), new THREE.MeshStandardMaterial());
-      } else {
-        // Fallback flat floor if base.stl failed to load
+        solidGeometries.push(cleanGeometry(geom));
+      } else if (walls.length > 0) {
+        // Fallback flat floor
         let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
         walls.forEach(w => {
           minX = Math.min(minX, w.start.x, w.end.x); maxX = Math.max(maxX, w.start.x, w.end.x);
           minZ = Math.min(minZ, w.start.y, w.end.y); maxZ = Math.max(maxZ, w.start.y, w.end.y);
         });
-        holes.forEach(h => {
-          minX = Math.min(minX, h.x - 10); maxX = Math.max(maxX, h.x + 10);
-          minZ = Math.min(minZ, h.y - 10); maxZ = Math.max(maxZ, h.y + 10);
-        });
-
         const floorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
         floorGeom.translate((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
-        finalSolidMesh = new THREE.Mesh(cleanGeometry(floorGeom), new THREE.MeshStandardMaterial());
+        solidGeometries.push(cleanGeometry(floorGeom));
       }
-      
-      finalSolidMesh.updateMatrixWorld();
-      
-      // --- 2. UNION ALL WALLS TO BASE ---
-      // Instead of grouping walls, we fuse them directly into the base as a single solid
-      const wallGeometries: THREE.BufferGeometry[] = [];
       
       if (wallsGroupRef.current) {
         wallsGroupRef.current.traverse((child) => {
@@ -577,41 +560,42 @@ export default function App() {
             const geom = child.geometry.clone();
             child.updateWorldMatrix(true, false);
             geom.applyMatrix4(child.matrixWorld);
-            wallGeometries.push(cleanGeometry(geom));
+            solidGeometries.push(cleanGeometry(geom));
           }
         });
       }
 
-      if (wallGeometries.length > 0) {
-        const mergedWallsGeom = mergeGeometries(wallGeometries, false);
-        if (mergedWallsGeom) {
-          const mergedWallsMesh = new THREE.Mesh(mergedWallsGeom, new THREE.MeshStandardMaterial());
-          mergedWallsMesh.updateMatrixWorld();
-          
-          // Execute Boolean Union
-          finalSolidMesh = CSG.union(finalSolidMesh, mergedWallsMesh);
-        }
+      if (solidGeometries.length === 0 && holes.length === 0) {
+        alert('Nothing to export!');
+        setIsExporting(false);
+        return;
       }
+      
+      const exportGroup = new THREE.Group();
 
-      // --- 3. SUBTRACT HOLES AS NEGATIVE SPACE ---
+      // Instantly merge base plate and walls into ONE single structure
+      if (solidGeometries.length > 0) {
+        const mergedSolidGeom = mergeGeometries(solidGeometries, false);
+        if (!mergedSolidGeom) throw new Error("Failed to merge solid geometries");
+        
+        const finalSolidMesh = new THREE.Mesh(mergedSolidGeom, new THREE.MeshStandardMaterial());
+        exportGroup.add(finalSolidMesh);
+      }
+      
+      // --- 2. ADD HOLES AS SEPARATE SOLIDS (FOR THE SLICER) ---
       if (holes.length > 0) {
         for (let i = 0; i < holes.length; i++) {
           const hole = holes[i];
+          // We make them extra tall so they are easy to grab and ensure they pierce the floor in the slicer
           const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
           holeGeom.translate(hole.x, 0, hole.y);
           
           const holeMesh = new THREE.Mesh(cleanGeometry(holeGeom), new THREE.MeshStandardMaterial());
-          holeMesh.updateMatrixWorld();
-          
-          // Execute Boolean Subtraction
-          finalSolidMesh = CSG.subtract(finalSolidMesh, holeMesh);
+          exportGroup.add(holeMesh);
         }
       }
       
-      const exportGroup = new THREE.Group();
-      exportGroup.add(finalSolidMesh);
-      
-      // --- 4. EXPORT FINAL MESH ---
+      // --- 3. EXPORT FINAL MESH ---
       const stlResult = exporter.parse(exportGroup, { binary: true });
       const stlBlob = new Blob([stlResult], { type: 'application/octet-stream' });
       const stlUrl = URL.createObjectURL(stlBlob);
