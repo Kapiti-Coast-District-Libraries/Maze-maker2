@@ -393,6 +393,7 @@ export default function App() {
       if (clickedHole) {
         saveToHistory();
         setSelectedHoleId(clickedHole.id);
+        setSelectedWallId(null);
         setDragStartPoint(point);
         if (controlsRef.current) controlsRef.current.enabled = false;
         return;
@@ -402,9 +403,15 @@ export default function App() {
       if (clickedWall) {
         saveToHistory();
         setSelectedWallId(clickedWall.id);
+        setSelectedHoleId(null);
         setDragStartPoint(point);
         if (controlsRef.current) controlsRef.current.enabled = false;
+        return;
       }
+
+      // If we clicked on empty space, deselect everything
+      setSelectedHoleId(null);
+      setSelectedWallId(null);
     }
   };
 
@@ -477,8 +484,7 @@ export default function App() {
       setCurrentWall(null);
     }
 
-    setSelectedHoleId(null);
-    setSelectedWallId(null);
+    // Only stop dragging; do NOT clear the selection IDs here so you can delete them!
     setDragStartPoint(null);
 
     if (controlsRef.current) controlsRef.current.enabled = true;
