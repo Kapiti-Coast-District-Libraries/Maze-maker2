@@ -24,7 +24,7 @@ interface Wall {
   id: string;
   start: { x: number; y: number };
   end: { x: number; y: number };
-  control?: { x: number; y: number }; // Optional control point for curves
+  control?: { x: number; y: number }; // Added for curves
 }
 
 interface Hole {
@@ -38,7 +38,7 @@ export default function App() {
   const [walls, setWalls] = useState<Wall[]>([]);
   const [holes, setHoles] = useState<Hole[]>([]);
   const [isDrawing, setIsDrawing] = useState(false);
-  const [curveStep, setCurveStep] = useState<0 | 1 | 2>(0); // 0: Start, 1: End, 2: Control
+  const [curveStep, setCurveStep] = useState<0 | 1 | 2>(0);
   const [selectedHoleId, setSelectedHoleId] = useState<string | null>(null);
   const [selectedWallId, setSelectedWallId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -76,11 +76,10 @@ export default function App() {
 
   const [debugInfo, setDebugInfo] = useState({ width: 0, height: 0, ready: false, frames: 0 });
 
-  // HELPER: Generates 3D mesh for a curved wall segment
+  // Math helper for Curved Wall Geometry
   const createCurvedGeometry = (wall: Wall) => {
     if (!wall.control) return new THREE.BoxGeometry(0,0,0);
     
-    // Create the mathematical curve
     const curve = new THREE.QuadraticBezierCurve(
       new THREE.Vector2(wall.start.x, wall.start.y),
       new THREE.Vector2(wall.control.x, wall.control.y),
@@ -89,8 +88,6 @@ export default function App() {
 
     const points = curve.getPoints(32);
     const shape = new THREE.Shape();
-    
-    // Generate offset points for wall thickness
     const leftPoints: THREE.Vector2[] = [];
     const rightPoints: THREE.Vector2[] = [];
 
@@ -108,30 +105,46 @@ export default function App() {
     shape.closePath();
 
     const geometry = new THREE.ExtrudeGeometry(shape, { depth: WALL_HEIGHT, bevelEnabled: false });
-    geometry.rotateX(-Math.PI / 2); // Orient for Three.js scene
+    geometry.rotateX(-Math.PI / 2);
     return geometry;
   };
 
   // Handle OrbitControls configuration based on active tool
   useEffect(() => {
     if (!controlsRef.current) return;
+    
     if (activeTool !== 'select') {
-      controlsRef.current.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
+      controlsRef.current.mouseButtons = {
+        LEFT: null,
+        MIDDLE: THREE.MOUSE.PAN,
+        RIGHT: THREE.MOUSE.ROTATE
+      };
     } else {
-      controlsRef.current.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
+      controlsRef.current.mouseButtons = {
+        LEFT: THREE.MOUSE.ROTATE,
+        MIDDLE: THREE.MOUSE.PAN,
+        RIGHT: THREE.MOUSE.ROTATE
+      };
     }
   }, [activeTool]);
 
   // Initialize Scene
   useEffect(() => {
     if (!containerRef.current) return;
+
     const container = containerRef.current;
     
     const updateDebug = () => {
-      setDebugInfo(prev => ({ ...prev, width: container.clientWidth, height: container.clientHeight, ready: true }));
+      setDebugInfo(prev => ({
+        ...prev,
+        width: container.clientWidth,
+        height: container.clientHeight,
+        ready: true
+      }));
     };
 
     container.innerHTML = '';
+
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xf0f2f5);
     sceneRef.current = scene;
@@ -148,15 +161,18 @@ export default function App() {
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(width, height);
     renderer.shadowMap.enabled = true;
+    renderer.domElement.style.display = 'block';
     container.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
     controlsRef.current = controls;
 
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
     scene.add(ambientLight);
+
     const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
     dirLight.position.set(100, 200, 100);
     dirLight.castShadow = true;
@@ -167,7 +183,8 @@ export default function App() {
     gridHelperRef.current = gridHelper;
 
     const planeGeom = new THREE.PlaneGeometry(2000, 2000);
-    const drawingPlane = new THREE.Mesh(planeGeom, new THREE.MeshBasicMaterial({ visible: false }));
+    const planeMat = new THREE.MeshBasicMaterial({ visible: false });
+    const drawingPlane = new THREE.Mesh(planeGeom, planeMat);
     drawingPlane.rotation.x = -Math.PI / 2;
     scene.add(drawingPlane);
     drawingPlaneRef.current = drawingPlane;
@@ -181,23 +198,39 @@ export default function App() {
     holesGroupRef.current = holesGroup;
 
     const loader = new STLLoader();
-    loader.load(`${import.meta.env.BASE_URL}base.stl`, (geometry) => {
+    const stlUrl = `${import.meta.env.BASE_URL}base.stl`;
+    
+    loader.load(stlUrl, (geometry) => {
       const material = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, flatShading: true });
       const mesh = new THREE.Mesh(geometry, material);
+      
       geometry.computeBoundingBox();
       const center = new THREE.Vector3();
       geometry.boundingBox?.getCenter(center);
       mesh.position.sub(center);
       mesh.position.y = - (geometry.boundingBox?.min.y || 0);
+
       scene.add(mesh);
       setBaseMesh(mesh);
+      
+      const size = new THREE.Vector3();
+      geometry.boundingBox?.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      camera.position.set(maxDim * 1.5, maxDim * 1.5, maxDim * 1.5);
+      controls.target.set(0, size.y / 2, 0);
+      controls.update();
+    }, undefined, (error) => {
+      console.error('Error loading base.stl:', error);
     });
 
+    let animationId: number;
     let frameCount = 0;
     const animate = () => {
-      requestAnimationFrame(animate);
+      animationId = requestAnimationFrame(animate);
       frameCount++;
-      if (frameCount % 60 === 0) setDebugInfo(prev => ({ ...prev, frames: frameCount }));
+      if (frameCount % 60 === 0) {
+        setDebugInfo(prev => ({ ...prev, frames: frameCount }));
+      }
       if (controlsRef.current) controlsRef.current.update();
       if (rendererRef.current && sceneRef.current && cameraRef.current) {
         rendererRef.current.render(sceneRef.current, cameraRef.current);
@@ -208,6 +241,8 @@ export default function App() {
     const resizeObserver = new ResizeObserver(() => {
       if (!cameraRef.current || !rendererRef.current || !container) return;
       const rect = container.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      
       cameraRef.current.aspect = rect.width / rect.height;
       cameraRef.current.updateProjectionMatrix();
       rendererRef.current.setSize(rect.width, rect.height);
@@ -216,27 +251,38 @@ export default function App() {
     resizeObserver.observe(container);
 
     return () => {
+      cancelAnimationFrame(animationId);
       resizeObserver.disconnect();
-      if (rendererRef.current) rendererRef.current.dispose();
+      if (rendererRef.current) {
+        rendererRef.current.dispose();
+      }
+      if (container.contains(renderer.domElement)) {
+        container.removeChild(renderer.domElement);
+      }
     };
   }, []);
 
-  // Update Walls and Holes Meshes
+  // Update Walls and Holes
   useEffect(() => {
     if (!wallsGroupRef.current || !holesGroupRef.current) return;
     
-    // Cleanup
-    [wallsGroupRef.current, holesGroupRef.current].forEach(group => {
-      while(group.children.length > 0){ 
-        const child = group.children[0] as THREE.Mesh;
-        child.geometry.dispose();
-        (child.material as THREE.Material).dispose();
-        group.remove(child); 
-      }
-    });
+    while(wallsGroupRef.current.children.length > 0){ 
+      const child = wallsGroupRef.current.children[0] as THREE.Mesh;
+      child.geometry.dispose();
+      (child.material as THREE.Material).dispose();
+      wallsGroupRef.current.remove(child); 
+    }
+
+    while(holesGroupRef.current.children.length > 0){ 
+      const child = holesGroupRef.current.children[0] as THREE.Mesh;
+      child.geometry.dispose();
+      (child.material as THREE.Material).dispose();
+      holesGroupRef.current.remove(child); 
+    }
 
     const wallMaterial = new THREE.MeshStandardMaterial({ color: 0x3b82f6 });
     const selectedWallMaterial = new THREE.MeshStandardMaterial({ color: 0x10b981, emissive: 0x10b981, emissiveIntensity: 0.2 });
+    const holeMaterial = new THREE.MeshStandardMaterial({ color: 0xef4444, transparent: true, opacity: 0.8 });
 
     const renderWall = (wall: Wall, isPreview = false) => {
       const isSelected = wall.id === selectedWallId;
@@ -246,12 +292,9 @@ export default function App() {
         : (isSelected ? selectedWallMaterial : (isHovered ? new THREE.MeshStandardMaterial({ color: 0x60a5fa }) : wallMaterial));
 
       let mesh: THREE.Mesh;
-
       if (wall.control) {
-        // Render Curved Wall
         mesh = new THREE.Mesh(createCurvedGeometry(wall), material);
       } else {
-        // Render Straight Wall
         const dx = wall.end.x - wall.start.x;
         const dz = wall.end.y - wall.start.y;
         const length = Math.sqrt(dx * dx + dz * dz);
@@ -261,15 +304,13 @@ export default function App() {
         mesh.rotation.y = -Math.atan2(dz, dx);
         mesh.position.set((wall.start.x + wall.end.x) / 2, WALL_HEIGHT / 2, (wall.start.y + wall.end.y) / 2);
       }
-      
       wallsGroupRef.current?.add(mesh);
 
-      // Connectors
       const pillarGeom = new THREE.CylinderGeometry(WALL_THICKNESS / 2, WALL_THICKNESS / 2, WALL_HEIGHT, 16);
-      [wall.start, wall.end].forEach(pos => {
-        const p = new THREE.Mesh(pillarGeom, material);
-        p.position.set(pos.x, WALL_HEIGHT/2, pos.y);
-        wallsGroupRef.current?.add(p);
+      [wall.start, wall.end].forEach(p => {
+        const pillar = new THREE.Mesh(pillarGeom, material);
+        pillar.position.set(p.x, WALL_HEIGHT / 2, p.y);
+        wallsGroupRef.current?.add(pillar);
       });
     };
 
@@ -277,32 +318,76 @@ export default function App() {
     if (currentWall) renderWall(currentWall, true);
 
     holes.forEach(hole => {
+      const geometry = new THREE.CylinderGeometry(2.25, 2.25, 20, 32);
       const isSelected = hole.id === selectedHoleId;
-      const mat = new THREE.MeshStandardMaterial({ color: isSelected ? 0xffff00 : 0xef4444, transparent: true, opacity: 0.8 });
-      const mesh = new THREE.Mesh(new THREE.CylinderGeometry(2.25, 2.25, 20, 32), mat);
+      const isHovered = hole.id === hoveredId;
+      const material = isSelected 
+        ? new THREE.MeshStandardMaterial({ color: 0xffff00, emissive: 0xffff00, emissiveIntensity: 0.5 }) 
+        : (isHovered ? new THREE.MeshStandardMaterial({ color: 0xfca5a5 }) : holeMaterial);
+      const mesh = new THREE.Mesh(geometry, material);
       mesh.position.set(hole.x, 0, hole.y);
       holesGroupRef.current?.add(mesh);
     });
 
   }, [walls, holes, currentWall, selectedHoleId, selectedWallId, hoveredId]);
 
+  // Drawing Logic
   const getMousePoint = useCallback((e: React.MouseEvent | MouseEvent) => {
     if (!containerRef.current || !cameraRef.current || !drawingPlaneRef.current) return null;
+    
     const rect = containerRef.current.getBoundingClientRect();
     mouseRef.current.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     mouseRef.current.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
     raycasterRef.current.setFromCamera(mouseRef.current, cameraRef.current);
     const intersects = raycasterRef.current.intersectObject(drawingPlaneRef.current);
+    
     if (intersects.length > 0) {
-      const pt = { x: intersects[0].point.x, y: intersects[0].point.z };
-      if (snapToGrid) {
-        pt.x = Math.round(pt.x / GRID_SIZE) * GRID_SIZE;
-        pt.y = Math.round(pt.y / GRID_SIZE) * GRID_SIZE;
+      const rawPoint = { x: intersects[0].point.x, y: intersects[0].point.z };
+      
+      if (baseMesh) {
+        const checkRaycaster = new THREE.Raycaster();
+        checkRaycaster.set(new THREE.Vector3(rawPoint.x, 1000, rawPoint.y), new THREE.Vector3(0, -1, 0));
+        const meshIntersects = checkRaycaster.intersectObject(baseMesh);
+        if (meshIntersects.length === 0) return null;
       }
-      return pt;
+
+      if (snapToGrid) {
+        const snappedX = Math.round(rawPoint.x / GRID_SIZE) * GRID_SIZE;
+        const snappedY = Math.round(rawPoint.y / GRID_SIZE) * GRID_SIZE;
+        
+        if (baseMesh) {
+          const checkRaycaster = new THREE.Raycaster();
+          checkRaycaster.set(new THREE.Vector3(snappedX, 1000, snappedY), new THREE.Vector3(0, -1, 0));
+          const meshIntersects = checkRaycaster.intersectObject(baseMesh);
+          if (meshIntersects.length > 0) {
+            return { x: snappedX, y: snappedY };
+          }
+        } else {
+          return { x: snappedX, y: snappedY };
+        }
+      }
+      
+      return rawPoint;
     }
     return null;
-  }, [snapToGrid]);
+  }, [snapToGrid, baseMesh]);
+
+  const getDistanceToWall = (p: { x: number, y: number }, wall: Wall) => {
+    if (wall.control) {
+        // Curve distance is complex, use simple start/end proximity for now
+        const d1 = Math.sqrt((p.x - wall.start.x) ** 2 + (p.y - wall.start.y) ** 2);
+        const d2 = Math.sqrt((p.x - wall.end.x) ** 2 + (p.y - wall.end.y) ** 2);
+        const d3 = Math.sqrt((p.x - wall.control.x) ** 2 + (p.y - wall.control.y) ** 2);
+        return Math.min(d1, d2, d3);
+    }
+    const { start, end } = wall;
+    const l2 = (start.x - end.x) ** 2 + (start.y - end.y) ** 2;
+    if (l2 === 0) return Math.sqrt((p.x - start.x) ** 2 + (p.y - start.y) ** 2);
+    let t = ((p.x - start.x) * (end.x - start.x) + (p.y - start.y) * (end.y - start.y)) / l2;
+    t = Math.max(0, Math.min(1, t));
+    return Math.sqrt((p.x - (start.x + t * (end.x - start.x))) ** 2 + (p.y - (start.y + t * (end.y - start.y))) ** 2);
+  };
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return; 
@@ -314,96 +399,208 @@ export default function App() {
       setCurrentWall({ id: crypto.randomUUID(), start: point, end: point });
       if (controlsRef.current) controlsRef.current.enabled = false;
     } else if (activeTool === 'curve') {
-      if (curveStep === 0) {
-        setCurrentWall({ id: crypto.randomUUID(), start: point, end: point, control: point });
-        setCurveStep(1);
-      } else if (curveStep === 1) {
-        setCurveStep(2);
-      } else {
-        saveToHistory();
-        if (currentWall) setWalls([...walls, currentWall]);
-        setCurrentWall(null);
-        setCurveStep(0);
-      }
+        if (curveStep === 0) {
+            setCurrentWall({ id: crypto.randomUUID(), start: point, end: point, control: point });
+            setCurveStep(1);
+            if (controlsRef.current) controlsRef.current.enabled = false;
+        } else if (curveStep === 1) {
+            setCurveStep(2);
+        } else {
+            saveToHistory();
+            if (currentWall) setWalls(prev => [...prev, currentWall]);
+            setCurrentWall(null);
+            setCurveStep(0);
+            if (controlsRef.current) controlsRef.current.enabled = true;
+        }
     } else if (activeTool === 'hole') {
       saveToHistory();
-      setHoles([...holes, { id: crypto.randomUUID(), x: point.x, y: point.y }]);
+      setHoles(prev => [...prev, { id: crypto.randomUUID(), x: point.x, y: point.y }]);
     } else if (activeTool === 'select') {
-      // (Select logic same as before)
-      const clickedHole = holes.find(h => Math.sqrt((h.x - point.x) ** 2 + (h.y - point.y) ** 2) < 8);
+      const clickedHole = holes.find(h => {
+        const d = Math.sqrt((h.x - point.x) ** 2 + (h.y - point.y) ** 2);
+        return d < 8; 
+      });
+      
       if (clickedHole) {
-        setSelectedHoleId(clickedHole.id); setSelectedWallId(null); setDragStartPoint(point);
+        saveToHistory();
+        setSelectedHoleId(clickedHole.id);
+        setSelectedWallId(null);
+        setDragStartPoint(point);
         if (controlsRef.current) controlsRef.current.enabled = false;
         return;
       }
-      setSelectedHoleId(null); setSelectedWallId(null);
+
+      const clickedWall = walls.find(w => getDistanceToWall(point, w) < 5); 
+      if (clickedWall) {
+        saveToHistory();
+        setSelectedWallId(clickedWall.id);
+        setSelectedHoleId(null);
+        setDragStartPoint(point);
+        if (controlsRef.current) controlsRef.current.enabled = false;
+        return;
+      }
+
+      setSelectedHoleId(null);
+      setSelectedWallId(null);
     }
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
     const point = getMousePoint(e);
-    if (!point) return;
+    if (!point) {
+      setHoveredId(null);
+      return;
+    }
 
     if (activeTool === 'draw' && isDrawing && currentWall) {
       setCurrentWall({ ...currentWall, end: point });
     } else if (activeTool === 'curve' && currentWall) {
-      if (curveStep === 1) {
-        setCurrentWall({ ...currentWall, end: point, control: { x: (currentWall.start.x + point.x)/2, y: (currentWall.start.y + point.y)/2 } });
-      } else if (curveStep === 2) {
-        setCurrentWall({ ...currentWall, control: point });
+        if (curveStep === 1) {
+            setCurrentWall({ ...currentWall, end: point, control: { x: (currentWall.start.x + point.x) / 2, y: (currentWall.start.y + point.y) / 2 } });
+        } else if (curveStep === 2) {
+            setCurrentWall({ ...currentWall, control: point });
+        }
+    } else if (selectedHoleId && dragStartPoint) {
+      setHoles(prev => prev.map(h => h.id === selectedHoleId ? { ...h, x: point.x, y: point.y } : h));
+    } else if (selectedWallId && dragStartPoint) {
+      const dx = point.x - dragStartPoint.x;
+      const dy = point.y - dragStartPoint.y;
+      
+      setWalls(prev => prev.map(w => {
+        if (w.id === selectedWallId) {
+          const newStart = { x: w.start.x + dx, y: w.start.y + dy };
+          const newEnd = { x: w.end.x + dx, y: w.end.y + dy };
+          const newControl = w.control ? { x: w.control.x + dx, y: w.control.y + dy } : undefined;
+          return { ...w, start: newStart, end: newEnd, control: newControl };
+        }
+        return w;
+      }));
+      setDragStartPoint(point);
+    } else if (activeTool === 'select') {
+      const hoveredHole = holes.find(h => Math.sqrt((h.x - point.x) ** 2 + (h.y - point.y) ** 2) < 8);
+      if (hoveredHole) {
+        setHoveredId(hoveredHole.id);
+        return;
       }
+      const hoveredWall = walls.find(w => getDistanceToWall(point, w) < 5);
+      if (hoveredWall) {
+        setHoveredId(hoveredWall.id);
+        return;
+      }
+      setHoveredId(null);
     }
   };
 
   const handleMouseUp = () => {
     if (activeTool === 'draw' && isDrawing && currentWall) {
-      saveToHistory();
-      setWalls([...walls, currentWall]);
-      setCurrentWall(null);
+      const dx = currentWall.end.x - currentWall.start.x;
+      const dy = currentWall.end.y - currentWall.start.y;
+      const length = Math.sqrt(dx * dx + dy * dy);
+      
+      if (length > 0.5) {
+        saveToHistory();
+        setWalls(prev => [...prev, currentWall]);
+      }
+      
       setIsDrawing(false);
+      setCurrentWall(null);
       if (controlsRef.current) controlsRef.current.enabled = true;
     }
     setDragStartPoint(null);
   };
 
-  const clearWalls = () => { saveToHistory(); setWalls([]); setHoles([]); setShowClearConfirm(false); };
+  const clearWalls = () => {
+    saveToHistory();
+    setWalls([]);
+    setHoles([]);
+    setShowClearConfirm(false);
+  };
+
+  const deleteSelected = () => {
+    if (selectedHoleId) {
+      saveToHistory();
+      setHoles(prev => prev.filter(h => h.id !== selectedHoleId));
+      setSelectedHoleId(null);
+    } else if (selectedWallId) {
+      saveToHistory();
+      setWalls(prev => prev.filter(w => w.id !== selectedWallId));
+      setSelectedWallId(null);
+    }
+    if (controlsRef.current) controlsRef.current.enabled = true;
+  };
+
+  const [isExporting, setIsExporting] = useState(false);
 
   const exportSTL = async () => {
     if (!sceneRef.current) return;
     setIsExporting(true);
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise(resolve => setTimeout(resolve, 50));
     const exporter = new STLExporter();
+
+    const cleanGeometry = (geom: THREE.BufferGeometry) => {
+      let cleaned = geom.clone();
+      if (cleaned.index) cleaned = cleaned.toNonIndexed();
+      for (const key in cleaned.attributes) {
+        if (key !== 'position' && key !== 'normal') cleaned.deleteAttribute(key);
+      }
+      cleaned.clearGroups();
+      return cleaned;
+    };
     
     try {
       const solidGeometries: THREE.BufferGeometry[] = [];
       if (baseMesh) {
-        const g = baseMesh.geometry.clone(); g.applyMatrix4(baseMesh.matrixWorld);
-        solidGeometries.push(g);
+        const geom = baseMesh.geometry.clone();
+        geom.applyMatrix4(baseMesh.matrixWorld);
+        solidGeometries.push(cleanGeometry(geom));
       }
-      wallsGroupRef.current?.traverse((c) => {
-        if (c instanceof THREE.Mesh) {
-          const g = c.geometry.clone(); c.updateWorldMatrix(true, false); g.applyMatrix4(c.matrixWorld);
-          solidGeometries.push(g);
-        }
-      });
+      
+      if (wallsGroupRef.current) {
+        wallsGroupRef.current.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            const geom = child.geometry.clone();
+            child.updateWorldMatrix(true, false);
+            geom.applyMatrix4(child.matrixWorld);
+            solidGeometries.push(cleanGeometry(geom));
+          }
+        });
+      }
 
-      const merged = mergeGeometries(solidGeometries, false);
       const exportGroup = new THREE.Group();
-      if (merged) exportGroup.add(new THREE.Mesh(merged));
+      if (solidGeometries.length > 0) {
+        const mergedSolidGeom = mergeGeometries(solidGeometries, false);
+        if (mergedSolidGeom) exportGroup.add(new THREE.Mesh(mergedSolidGeom, new THREE.MeshStandardMaterial()));
+      }
+      
+      if (holes.length > 0) {
+        for (let i = 0; i < holes.length; i++) {
+          const hole = holes[i];
+          const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
+          holeGeom.translate(hole.x, 0, hole.y);
+          exportGroup.add(new THREE.Mesh(cleanGeometry(holeGeom), new THREE.MeshStandardMaterial()));
+        }
+      }
       
       const stlResult = exporter.parse(exportGroup, { binary: true });
       const link = document.createElement('a');
-      link.href = URL.createObjectURL(new Blob([stlResult]));
+      link.href = URL.createObjectURL(new Blob([stlResult], { type: 'application/octet-stream' }));
       link.download = 'maze_architect_export.stl';
       link.click();
-    } finally { setIsExporting(false); }
+    } catch (error) {
+      console.error('Export Error:', error);
+    } finally {
+      setIsExporting(false);
+    }
   };
-
+  
   return (
     <div className="flex flex-col h-screen bg-white font-sans text-neutral-900 overflow-hidden">
+      {/* Header */}
       <header className="flex items-center justify-between px-6 py-4 border-b border-neutral-200 z-20 bg-white">
         <div className="flex items-center gap-3">
-          <div className="p-2 bg-blue-600 rounded-lg"><Layers className="w-6 h-6 text-white" /></div>
+          <div className="p-2 bg-blue-600 rounded-lg">
+            <Layers className="w-6 h-6 text-white" />
+          </div>
           <div>
             <h1 className="text-xl font-semibold tracking-tight">Maze Architect</h1>
             <p className="text-[10px] text-neutral-400 font-bold uppercase tracking-widest">3D Print Generator • <span className="text-green-500">Active</span></p>
@@ -412,13 +609,25 @@ export default function App() {
         
         <div className="flex items-center gap-4">
           <div className="flex bg-neutral-100 p-1 rounded-xl border border-neutral-200">
-            <button onClick={() => setActiveTool('select')} className={`flex items-center gap-2 px-4 py-2 rounded-lg ${activeTool === 'select' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500'}`}><MousePointer2 className="w-4 h-4" /> <span className="text-sm font-semibold">Select</span></button>
-            <button onClick={() => setActiveTool('draw')} className={`flex items-center gap-2 px-4 py-2 rounded-lg ${activeTool === 'draw' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500'}`}><PenTool className="w-4 h-4" /> <span className="text-sm font-semibold">Walls</span></button>
-            <button onClick={() => setActiveTool('curve')} className={`flex items-center gap-2 px-4 py-2 rounded-lg ${activeTool === 'curve' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500'}`}><Spline className="w-4 h-4" /> <span className="text-sm font-semibold">Curves</span></button>
-            <button onClick={() => setActiveTool('hole')} className={`flex items-center gap-2 px-4 py-2 rounded-lg ${activeTool === 'hole' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500'}`}><Circle className="w-4 h-4" /> <span className="text-sm font-semibold">Hole</span></button>
+            <button onClick={() => { setActiveTool('select'); setCurveStep(0); }} className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${activeTool === 'select' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500 hover:text-neutral-700'}`}>
+              <MousePointer2 className="w-4 h-4" /> <span className="text-sm font-semibold">Select</span>
+            </button>
+            <button onClick={() => { setActiveTool('draw'); setCurveStep(0); }} className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${activeTool === 'draw' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500 hover:text-neutral-700'}`}>
+              <PenTool className="w-4 h-4" /> <span className="text-sm font-semibold">Walls</span>
+            </button>
+            <button onClick={() => { setActiveTool('curve'); setCurveStep(0); }} className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${activeTool === 'curve' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500 hover:text-neutral-700'}`}>
+              <Spline className="w-4 h-4" /> <span className="text-sm font-semibold">Curves</span>
+            </button>
+            <button onClick={() => { setActiveTool('hole'); setCurveStep(0); }} className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${activeTool === 'hole' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500 hover:text-neutral-700'}`}>
+              <Circle className="w-4 h-4" /> <span className="text-sm font-semibold">Hole</span>
+            </button>
           </div>
-          <button onClick={undo} disabled={history.length === 0} className="flex items-center gap-2 px-4 py-2 rounded-xl border bg-white disabled:opacity-30"><Undo2 className="w-4 h-4" /> <span className="text-sm font-semibold">Undo</span></button>
-          <button onClick={exportSTL} disabled={isExporting} className="flex items-center gap-2 px-6 py-2 bg-blue-600 text-white rounded-xl font-bold shadow-md active:scale-95">
+
+          <button onClick={undo} disabled={history.length === 0} className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all border ${history.length > 0 ? 'bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-50 shadow-sm' : 'bg-neutral-50 border-neutral-100 text-neutral-300 cursor-not-allowed'}`}>
+            <Undo2 className="w-4 h-4" /> <span className="text-sm font-semibold">Undo</span>
+          </button>
+          
+          <button onClick={exportSTL} disabled={isExporting} className="flex items-center gap-2 px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-xl font-bold transition-all shadow-md active:scale-95">
             {isExporting ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Download className="w-4 h-4" />}
             <span>{isExporting ? 'Processing...' : 'Export STL'}</span>
           </button>
@@ -426,55 +635,115 @@ export default function App() {
       </header>
 
       <main className="flex flex-1 relative overflow-hidden">
-        <aside className="w-72 bg-white border-r border-neutral-200 flex flex-col z-20 shadow-xl p-6 space-y-8 overflow-y-auto">
-          <section className="space-y-4">
-            <h2 className="text-[10px] font-black text-neutral-400 uppercase tracking-widest">Wall Specs</h2>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-100">
-                <p className="text-[9px] font-black text-neutral-400 uppercase">Thickness</p>
-                <p className="text-lg font-mono font-bold text-neutral-800">{WALL_THICKNESS}mm</p>
+        <aside className="w-72 bg-white border-r border-neutral-200 flex flex-col z-20 shadow-xl">
+          <div className="p-6 space-y-8 overflow-y-auto">
+            <section className="space-y-4">
+              <h2 className="text-[10px] font-black text-neutral-400 uppercase tracking-widest">Wall Specs</h2>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-100">
+                  <p className="text-[9px] font-black text-neutral-400 uppercase">Thickness</p>
+                  <p className="text-lg font-mono font-bold text-neutral-800">{WALL_THICKNESS}mm</p>
+                </div>
+                <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-100">
+                  <p className="text-[9px] font-black text-neutral-400 uppercase">Height</p>
+                  <p className="text-lg font-mono font-bold text-neutral-800">{WALL_HEIGHT}mm</p>
+                </div>
               </div>
-              <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-100">
-                <p className="text-[9px] font-black text-neutral-400 uppercase">Height</p>
-                <p className="text-lg font-mono font-bold text-neutral-800">{WALL_HEIGHT}mm</p>
-              </div>
-            </div>
-          </section>
+            </section>
 
-          <section className="space-y-4">
-            <h2 className="text-[10px] font-black text-neutral-400 uppercase tracking-widest">Editor</h2>
-            <div className="space-y-2">
-              <label className="flex items-center justify-between p-4 bg-neutral-50 rounded-2xl border border-neutral-100 cursor-pointer">
-                <span className="text-xs font-bold text-neutral-600">Snap to Grid</span>
-                <input type="checkbox" checked={snapToGrid} onChange={(e) => setSnapToGrid(e.target.checked)} className="w-4 h-4 text-blue-600" />
-              </label>
-              <label className="flex items-center justify-between p-4 bg-neutral-50 rounded-2xl border border-neutral-100 cursor-pointer">
-                <span className="text-xs font-bold text-neutral-600">Show Grid</span>
-                <input type="checkbox" checked={gridVisible} onChange={(e) => { setGridVisible(e.target.checked); if (gridHelperRef.current) gridHelperRef.current.visible = e.target.checked; }} className="w-4 h-4 text-blue-600" />
-              </label>
-            </div>
-            <button onClick={() => setShowClearConfirm(true)} className="w-full flex items-center justify-center gap-2 p-4 bg-red-50 text-red-600 rounded-2xl border border-red-100 font-bold text-xs">
-              <Trash2 className="w-4 h-4" /> Clear All
-            </button>
-          </section>
+            <section className="space-y-4">
+              <h2 className="text-[10px] font-black text-neutral-400 uppercase tracking-widest">Editor</h2>
+              {activeTool === 'select' && (
+                <div className="p-4 bg-blue-50 border border-blue-100 rounded-2xl flex gap-3 animate-in fade-in slide-in-from-top-2 duration-300">
+                  <Info className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
+                  <p className="text-[11px] leading-relaxed text-blue-700 font-medium">
+                    <strong className="block mb-0.5">Select Mode</strong> Click and drag walls or holes to move them.
+                  </p>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <label className="flex items-center justify-between p-4 bg-neutral-50 rounded-2xl border border-neutral-100 cursor-pointer hover:bg-neutral-100 transition-all">
+                  <span className="text-xs font-bold text-neutral-600">Snap to Grid</span>
+                  <input type="checkbox" checked={snapToGrid} onChange={(e) => setSnapToGrid(e.target.checked)} className="w-4 h-4 text-blue-600 rounded-full focus:ring-blue-500" />
+                </label>
+                <label className="flex items-center justify-between p-4 bg-neutral-50 rounded-2xl border border-neutral-100 cursor-pointer hover:bg-neutral-100 transition-all">
+                  <span className="text-xs font-bold text-neutral-600">Show Grid</span>
+                  <input type="checkbox" checked={gridVisible} onChange={(e) => { setGridVisible(e.target.checked); if (gridHelperRef.current) gridHelperRef.current.visible = e.target.checked; }} className="w-4 h-4 text-blue-600 rounded-full focus:ring-blue-500" />
+                </label>
+              </div>
+              
+              {showClearConfirm ? (
+                <div className="flex gap-2">
+                  <button onClick={clearWalls} className="flex-1 p-4 bg-red-600 text-white rounded-2xl font-bold text-xs active:scale-95 transition-transform">Confirm Clear</button>
+                  <button onClick={() => setShowClearConfirm(false)} className="p-4 bg-neutral-200 text-neutral-600 rounded-2xl font-bold text-xs active:scale-95 transition-transform">Cancel</button>
+                </div>
+              ) : (
+                <button onClick={() => setShowClearConfirm(true)} className="w-full flex items-center justify-center gap-2 p-4 bg-red-50 hover:bg-red-100 text-red-600 rounded-2xl border border-red-100 transition-all font-bold text-xs active:scale-95">
+                  <Trash2 className="w-4 h-4" /> <span>Clear All</span>
+                </button>
+              )}
+            </section>
+
+            <section className="pt-6 border-t border-neutral-100">
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <PenTool className="w-3 h-3 text-neutral-400" />
+                    <span className="text-xs font-bold text-neutral-400">Walls: <span className="text-neutral-900">{walls.length}</span></span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Circle className="w-3 h-3 text-neutral-400" />
+                    <span className="text-xs font-bold text-neutral-400">Holes: <span className="text-neutral-900">{holes.length}</span></span>
+                  </div>
+                </div>
+                {(selectedHoleId || selectedWallId) && (
+                  <button onClick={deleteSelected} className="w-full flex items-center justify-center gap-2 p-3 bg-red-50 text-red-600 rounded-xl border border-red-100 font-bold text-xs hover:bg-red-100 transition-all mt-2 active:scale-95">
+                    <Trash2 className="w-4 h-4" /> Delete Selected {selectedHoleId ? 'Hole' : 'Wall'}
+                  </button>
+                )}
+              </div>
+            </section>
+          </div>
         </aside>
 
         <div className="flex-1 relative bg-[#f8f9fa] overflow-hidden">
-          <div ref={containerRef} className="absolute inset-0" onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} />
+          <div 
+            ref={containerRef} 
+            className="absolute inset-0"
+            style={{ cursor: hoveredId ? 'pointer' : (activeTool === 'draw' ? 'crosshair' : (activeTool === 'select' ? 'default' : 'grab')) }}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
+          />
           
           <div className="absolute top-4 right-4 bg-black/80 text-white p-2 rounded text-xs font-mono z-50 pointer-events-none">
             Viewport: {debugInfo.width}x{debugInfo.height} | F: {debugInfo.frames}
           </div>
 
+          <div className="absolute top-6 right-6 flex flex-col gap-2 z-10">
+             <div className="bg-white/80 backdrop-blur-md p-2 rounded-2xl border border-neutral-200 shadow-xl flex flex-col gap-1">
+                <button onClick={() => { if (cameraRef.current && controlsRef.current) { cameraRef.current.position.set(0, 150, 0); controlsRef.current.target.set(0, 0, 0); controlsRef.current.update(); }}} className="p-3 hover:bg-blue-50 hover:text-blue-600 rounded-xl text-neutral-500 transition-all" title="Top View"><Layers className="w-5 h-5" /></button>
+                <button onClick={() => { if (cameraRef.current && controlsRef.current) { cameraRef.current.position.set(100, 100, 100); controlsRef.current.target.set(0, 0, 0); controlsRef.current.update(); }}} className="p-3 hover:bg-blue-50 hover:text-blue-600 rounded-xl text-neutral-500 transition-all" title="Perspective View"><Box className="w-5 h-5" /></button>
+             </div>
+          </div>
+
           <AnimatePresence>
-            {activeTool === 'curve' && (
-              <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="absolute bottom-10 left-1/2 -translate-x-1/2 bg-blue-600 text-white px-8 py-4 rounded-2xl shadow-2xl flex items-center gap-4 z-10 pointer-events-none">
-                <Spline className="w-5 h-5" />
+            {(activeTool !== 'select') && (
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.9, y: 20 }}
+                className="absolute bottom-10 left-1/2 -translate-x-1/2 bg-blue-600 text-white px-8 py-4 rounded-2xl shadow-2xl flex items-center gap-4 pointer-events-none z-10"
+              >
+                {activeTool === 'draw' ? <PenTool className="w-5 h-5" /> : (activeTool === 'curve' ? <Spline className="w-5 h-5" /> : <Circle className="w-5 h-5" />)}
                 <span className="text-sm font-black uppercase tracking-widest">
-                  {curveStep === 0 && "Click to Start Curve"}
-                  {curveStep === 1 && "Click to Set End Point"}
-                  {curveStep === 2 && "Move to Curve, Click to Finish"}
+                  {activeTool === 'draw' && 'Wall Drawing Active'}
+                  {activeTool === 'hole' && 'Hole Placement Active'}
+                  {activeTool === 'curve' && (curveStep === 0 ? 'Click to Start Curve' : (curveStep === 1 ? 'Set End Point' : 'Adjust Curvature'))}
                 </span>
+                <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
               </motion.div>
             )}
           </AnimatePresence>
