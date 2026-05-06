@@ -10,7 +10,8 @@ import {
   Layers,
   Circle,
   Undo2,
-  Info
+  Info,
+  Spline
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -21,8 +22,10 @@ const GRID_SIZE = 5; // mm (default grid cell size)
 
 interface Wall {
   id: string;
+  type?: 'straight' | 'curve';
   start: { x: number; y: number };
   end: { x: number; y: number };
+  control?: { x: number; y: number };
 }
 
 interface Hole {
@@ -40,8 +43,12 @@ export default function App() {
   const [selectedWallId, setSelectedWallId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [dragStartPoint, setDragStartPoint] = useState<{ x: number; y: number } | null>(null);
-  const [currentWall, setCurrentWall] = useState<{ start: { x: number; y: number }, end: { x: number; y: number } } | null>(null);
-  const [activeTool, setActiveTool] = useState<'select' | 'draw' | 'hole'>('select');
+  
+  // States for drawing tools
+  const [currentWall, setCurrentWall] = useState<{ type?: 'straight' | 'curve', start: { x: number; y: number }, end: { x: number; y: number }, control?: { x: number; y: number } } | null>(null);
+  const [activeTool, setActiveTool] = useState<'select' | 'draw' | 'curve' | 'hole'>('select');
+  const [curveStep, setCurveStep] = useState<'idle' | 'placing_end' | 'placing_control'>('idle');
+
   const [snapToGrid, setSnapToGrid] = useState(true);
   const [gridVisible, setGridVisible] = useState(true);
   const [history, setHistory] = useState<{ walls: Wall[], holes: Hole[] }[]>([]);
@@ -77,7 +84,7 @@ export default function App() {
   useEffect(() => {
     if (!controlsRef.current) return;
     
-    if (activeTool === 'draw' || activeTool === 'hole') {
+    if (activeTool === 'draw' || activeTool === 'hole' || activeTool === 'curve') {
       controlsRef.current.mouseButtons = {
         LEFT: null,
         MIDDLE: THREE.MOUSE.PAN,
@@ -248,37 +255,65 @@ export default function App() {
     const selectedWallMaterial = new THREE.MeshStandardMaterial({ color: 0x10b981, emissive: 0x10b981, emissiveIntensity: 0.2 });
     const holeMaterial = new THREE.MeshStandardMaterial({ color: 0xef4444, transparent: true, opacity: 0.8 });
 
-    walls.forEach(wall => {
-      const dx = wall.end.x - wall.start.x;
-      const dz = wall.end.y - wall.start.y;
+    // Helper functions to build wall geometries (handles both straight and curved)
+    const createWallSegment = (start: { x: number, y: number }, end: { x: number, y: number }, material: THREE.Material) => {
+      const dx = end.x - start.x;
+      const dz = end.y - start.y;
       const length = Math.sqrt(dx * dx + dz * dz);
       if (length < 0.1) return;
-
-      const isSelected = wall.id === selectedWallId;
-      const isHovered = wall.id === hoveredId;
-      const material = isSelected ? selectedWallMaterial : (isHovered ? new THREE.MeshStandardMaterial({ color: 0x60a5fa }) : wallMaterial);
 
       const geometry = new THREE.BoxGeometry(length, WALL_HEIGHT, WALL_THICKNESS);
       const mesh = new THREE.Mesh(geometry, material);
       const angle = Math.atan2(dz, dx);
       mesh.rotation.y = -angle;
       mesh.position.set(
-        (wall.start.x + wall.end.x) / 2,
+        (start.x + end.x) / 2,
         WALL_HEIGHT / 2,
-        (wall.start.y + wall.end.y) / 2
+        (start.y + end.y) / 2
       );
       wallsGroupRef.current?.add(mesh);
+    };
 
+    const createPillar = (point: { x: number, y: number }, material: THREE.Material) => {
       const pillarGeom = new THREE.CylinderGeometry(WALL_THICKNESS / 2, WALL_THICKNESS / 2, WALL_HEIGHT, 16);
-      
-      const startPillar = new THREE.Mesh(pillarGeom, material);
-      startPillar.position.set(wall.start.x, WALL_HEIGHT / 2, wall.start.y);
-      wallsGroupRef.current?.add(startPillar);
+      const pillar = new THREE.Mesh(pillarGeom, material);
+      pillar.position.set(point.x, WALL_HEIGHT / 2, point.y);
+      wallsGroupRef.current?.add(pillar);
+    };
 
-      const endPillar = new THREE.Mesh(pillarGeom, material);
-      endPillar.position.set(wall.end.x, WALL_HEIGHT / 2, wall.end.y);
-      wallsGroupRef.current?.add(endPillar);
+    const renderWall = (wall: any, material: THREE.Material) => {
+      if (wall.type === 'curve' && wall.control) {
+        const curve = new THREE.QuadraticBezierCurve(
+          new THREE.Vector2(wall.start.x, wall.start.y),
+          new THREE.Vector2(wall.control.x, wall.control.y),
+          new THREE.Vector2(wall.end.x, wall.end.y)
+        );
+        // Create segments along the curve to mimic a wall solid geometry
+        const points = curve.getPoints(24);
+        for (let i = 0; i < points.length - 1; i++) {
+          createWallSegment(points[i], points[i + 1], material);
+          createPillar(points[i], material);
+        }
+        createPillar(points[points.length - 1], material);
+      } else {
+        // Straight Wall
+        createWallSegment(wall.start, wall.end, material);
+        createPillar(wall.start, material);
+        createPillar(wall.end, material);
+      }
+    };
+
+    walls.forEach(wall => {
+      const isSelected = wall.id === selectedWallId;
+      const isHovered = wall.id === hoveredId;
+      const material = isSelected ? selectedWallMaterial : (isHovered ? new THREE.MeshStandardMaterial({ color: 0x60a5fa }) : wallMaterial);
+      renderWall(wall, material);
     });
+
+    if (currentWall) {
+      const previewMat = new THREE.MeshStandardMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.5 });
+      renderWall(currentWall, previewMat);
+    }
 
     holes.forEach(hole => {
       const geometry = new THREE.CylinderGeometry(2.25, 2.25, 20, 32);
@@ -292,33 +327,6 @@ export default function App() {
       holesGroupRef.current?.add(mesh);
     });
 
-    if (currentWall) {
-      const dx = currentWall.end.x - currentWall.start.x;
-      const dz = currentWall.end.y - currentWall.start.y;
-      const length = Math.sqrt(dx * dx + dz * dz);
-      if (length > 0.1) {
-        const previewMat = new THREE.MeshStandardMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.5 });
-        
-        const geometry = new THREE.BoxGeometry(length, WALL_HEIGHT, WALL_THICKNESS);
-        const mesh = new THREE.Mesh(geometry, previewMat);
-        const angle = Math.atan2(dz, dx);
-        mesh.rotation.y = -angle;
-        mesh.position.set(
-          (currentWall.start.x + currentWall.end.x) / 2,
-          WALL_HEIGHT / 2,
-          (currentWall.start.y + currentWall.end.y) / 2
-        );
-        wallsGroupRef.current?.add(mesh);
-
-        const pillarGeom = new THREE.CylinderGeometry(WALL_THICKNESS / 2, WALL_THICKNESS / 2, WALL_HEIGHT, 16);
-        const startPillar = new THREE.Mesh(pillarGeom, previewMat);
-        startPillar.position.set(currentWall.start.x, WALL_HEIGHT / 2, currentWall.start.y);
-        wallsGroupRef.current?.add(startPillar);
-        const endPillar = new THREE.Mesh(pillarGeom, previewMat);
-        endPillar.position.set(currentWall.end.x, WALL_HEIGHT / 2, currentWall.end.y);
-        wallsGroupRef.current?.add(endPillar);
-      }
-    }
   }, [walls, holes, currentWall, selectedHoleId, selectedWallId, hoveredId]);
 
   // Drawing Logic
@@ -363,13 +371,31 @@ export default function App() {
     return null;
   }, [snapToGrid, baseMesh]);
 
-  const getDistanceToWall = (p: { x: number, y: number }, wall: Wall) => {
-    const { start, end } = wall;
+  const getDistanceToSegment = (p: { x: number, y: number }, start: { x: number, y: number }, end: { x: number, y: number }) => {
     const l2 = (start.x - end.x) ** 2 + (start.y - end.y) ** 2;
     if (l2 === 0) return Math.sqrt((p.x - start.x) ** 2 + (p.y - start.y) ** 2);
     let t = ((p.x - start.x) * (end.x - start.x) + (p.y - start.y) * (end.y - start.y)) / l2;
     t = Math.max(0, Math.min(1, t));
     return Math.sqrt((p.x - (start.x + t * (end.x - start.x))) ** 2 + (p.y - (start.y + t * (end.y - start.y))) ** 2);
+  };
+
+  const getDistanceToWall = (p: { x: number, y: number }, wall: Wall) => {
+    if (wall.type === 'curve' && wall.control) {
+      const curve = new THREE.QuadraticBezierCurve(
+        new THREE.Vector2(wall.start.x, wall.start.y),
+        new THREE.Vector2(wall.control.x, wall.control.y),
+        new THREE.Vector2(wall.end.x, wall.end.y)
+      );
+      const points = curve.getPoints(24);
+      let minDist = Infinity;
+      for (let i = 0; i < points.length - 1; i++) {
+        const dist = getDistanceToSegment(p, points[i], points[i + 1]);
+        if (dist < minDist) minDist = dist;
+      }
+      return minDist;
+    } else {
+      return getDistanceToSegment(p, wall.start, wall.end);
+    }
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -379,8 +405,22 @@ export default function App() {
 
     if (activeTool === 'draw') {
       setIsDrawing(true);
-      setCurrentWall({ start: point, end: point });
+      setCurrentWall({ type: 'straight', start: point, end: point });
       if (controlsRef.current) controlsRef.current.enabled = false;
+    } else if (activeTool === 'curve') {
+      if (curveStep === 'idle') {
+        setCurveStep('placing_end');
+        setCurrentWall({ type: 'curve', start: point, end: point, control: point });
+        if (controlsRef.current) controlsRef.current.enabled = false;
+      } else if (curveStep === 'placing_control') {
+        if (currentWall) {
+          saveToHistory();
+          setWalls(prev => [...prev, { id: crypto.randomUUID(), ...currentWall }]);
+        }
+        setCurveStep('idle');
+        setCurrentWall(null);
+        if (controlsRef.current) controlsRef.current.enabled = true;
+      }
     } else if (activeTool === 'hole') {
       saveToHistory();
       setHoles(prev => [...prev, { id: crypto.randomUUID(), x: point.x, y: point.y }]);
@@ -422,8 +462,18 @@ export default function App() {
       return;
     }
 
-    if (isDrawing && currentWall) {
+    if (activeTool === 'draw' && isDrawing && currentWall) {
       setCurrentWall(prev => prev ? { ...prev, end: point } : null);
+    } else if (activeTool === 'curve' && currentWall) {
+      if (curveStep === 'placing_end') {
+        setCurrentWall(prev => prev ? { 
+          ...prev, 
+          end: point, 
+          control: { x: (prev.start.x + point.x) / 2, y: (prev.start.y + point.y) / 2 } 
+        } : null);
+      } else if (curveStep === 'placing_control') {
+        setCurrentWall(prev => prev ? { ...prev, control: point } : null);
+      }
     } else if (selectedHoleId && dragStartPoint) {
       setHoles(prev => prev.map(h => h.id === selectedHoleId ? { ...h, x: point.x, y: point.y } : h));
     } else if (selectedWallId && dragStartPoint) {
@@ -434,6 +484,7 @@ export default function App() {
         if (w.id === selectedWallId) {
           const newStart = { x: w.start.x + dx, y: w.start.y + dy };
           const newEnd = { x: w.end.x + dx, y: w.end.y + dy };
+          const newControl = w.control ? { x: w.control.x + dx, y: w.control.y + dy } : undefined;
           
           if (baseMesh) {
             const checkRaycaster = new THREE.Raycaster();
@@ -449,7 +500,7 @@ export default function App() {
             }
           }
           
-          return { ...w, start: newStart, end: newEnd };
+          return { ...w, start: newStart, end: newEnd, control: newControl };
         }
         return w;
       }));
@@ -470,7 +521,7 @@ export default function App() {
   };
 
   const handleMouseUp = () => {
-    if (isDrawing && currentWall) {
+    if (activeTool === 'draw' && isDrawing && currentWall) {
       const dx = currentWall.end.x - currentWall.start.x;
       const dy = currentWall.end.y - currentWall.start.y;
       const length = Math.sqrt(dx * dx + dy * dy);
@@ -482,12 +533,30 @@ export default function App() {
       
       setIsDrawing(false);
       setCurrentWall(null);
+    } else if (activeTool === 'curve' && curveStep === 'placing_end' && currentWall) {
+      const dx = currentWall.end.x - currentWall.start.x;
+      const dy = currentWall.end.y - currentWall.start.y;
+      const length = Math.sqrt(dx * dx + dy * dy);
+      
+      if (length > 0.5) {
+        setCurveStep('placing_control');
+        setDragStartPoint(null);
+        return; // Early return prevents controls from re-enabling!
+      } else {
+        setCurveStep('idle');
+        setCurrentWall(null);
+      }
     }
 
-    // Only stop dragging; do NOT clear the selection IDs here so you can delete them!
+    // Only stop dragging for moving mode
     setDragStartPoint(null);
 
-    if (controlsRef.current) controlsRef.current.enabled = true;
+    // Turn Orbit controls back on unless we're in the middle of bending a curve
+    if (controlsRef.current) {
+      if (!(activeTool === 'curve' && curveStep === 'placing_control')) {
+        controlsRef.current.enabled = true;
+      }
+    }
   };
 
   const clearWalls = () => {
@@ -660,6 +729,22 @@ export default function App() {
             </button>
             <button 
               onClick={() => {
+                setActiveTool('curve');
+                setCurveStep('idle');
+                setCurrentWall(null);
+                if (cameraRef.current && controlsRef.current) {
+                  cameraRef.current.position.set(0, 150, 0);
+                  controlsRef.current.target.set(0, 0, 0);
+                  controlsRef.current.update();
+                }
+              }}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${activeTool === 'curve' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500 hover:text-neutral-700'}`}
+            >
+              <Spline className="w-4 h-4" />
+              <span className="text-sm font-semibold">Curve</span>
+            </button>
+            <button 
+              onClick={() => {
                 setActiveTool('hole');
                 if (cameraRef.current && controlsRef.current) {
                   cameraRef.current.position.set(0, 150, 0);
@@ -728,6 +813,16 @@ export default function App() {
                   <p className="text-[11px] leading-relaxed text-blue-700 font-medium">
                     <strong className="block mb-0.5">Select Mode</strong>
                     Click and drag walls or holes to move them. Use Delete/Backspace to remove selected items.
+                  </p>
+                </div>
+              )}
+
+              {activeTool === 'curve' && (
+                <div className="p-4 bg-blue-50 border border-blue-100 rounded-2xl flex gap-3 animate-in fade-in slide-in-from-top-2 duration-300">
+                  <Info className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
+                  <p className="text-[11px] leading-relaxed text-blue-700 font-medium">
+                    <strong className="block mb-0.5">Curve Mode</strong>
+                    Click and drag to set the line. Release, move your mouse to bend the arc, and click again to confirm.
                   </p>
                 </div>
               )}
@@ -815,7 +910,7 @@ export default function App() {
           <div 
             ref={containerRef} 
             className="absolute inset-0"
-            style={{ cursor: hoveredId ? 'pointer' : (activeTool === 'draw' ? 'crosshair' : (activeTool === 'select' ? 'default' : 'grab')) }}
+            style={{ cursor: hoveredId ? 'pointer' : ((activeTool === 'draw' || activeTool === 'curve') ? 'crosshair' : (activeTool === 'select' ? 'default' : 'grab')) }}
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
@@ -860,16 +955,16 @@ export default function App() {
 
           {/* Active Tool Label */}
           <AnimatePresence>
-            {(activeTool === 'draw' || activeTool === 'hole') && (
+            {(activeTool === 'draw' || activeTool === 'hole' || activeTool === 'curve') && (
               <motion.div 
                 initial={{ opacity: 0, scale: 0.9, y: 20 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.9, y: 20 }}
                 className="absolute bottom-10 left-1/2 -translate-x-1/2 bg-blue-600 text-white px-8 py-4 rounded-2xl shadow-2xl flex items-center gap-4 pointer-events-none z-10"
               >
-                {activeTool === 'draw' ? <PenTool className="w-5 h-5" /> : <Circle className="w-5 h-5" />}
+                {activeTool === 'draw' ? <PenTool className="w-5 h-5" /> : activeTool === 'curve' ? <Spline className="w-5 h-5" /> : <Circle className="w-5 h-5" />}
                 <span className="text-sm font-black uppercase tracking-widest">
-                  {activeTool === 'draw' ? 'Wall Drawing Active' : 'Hole Placement Active'}
+                  {activeTool === 'draw' ? 'Wall Drawing Active' : activeTool === 'curve' ? (curveStep === 'placing_control' ? 'Bending Curve' : 'Curve Drawing Active') : 'Hole Placement Active'}
                 </span>
                 <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
               </motion.div>
