@@ -10,8 +10,7 @@ import {
   Layers,
   Circle,
   Undo2,
-  Info,
-  Spline
+  Info
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -24,7 +23,6 @@ interface Wall {
   id: string;
   start: { x: number; y: number };
   end: { x: number; y: number };
-  control?: { x: number; y: number }; // Added for curves
 }
 
 interface Hole {
@@ -38,13 +36,12 @@ export default function App() {
   const [walls, setWalls] = useState<Wall[]>([]);
   const [holes, setHoles] = useState<Hole[]>([]);
   const [isDrawing, setIsDrawing] = useState(false);
-  const [curveStep, setCurveStep] = useState<0 | 1 | 2>(0);
   const [selectedHoleId, setSelectedHoleId] = useState<string | null>(null);
   const [selectedWallId, setSelectedWallId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [dragStartPoint, setDragStartPoint] = useState<{ x: number; y: number } | null>(null);
-  const [currentWall, setCurrentWall] = useState<Wall | null>(null);
-  const [activeTool, setActiveTool] = useState<'select' | 'draw' | 'curve' | 'hole'>('select');
+  const [currentWall, setCurrentWall] = useState<{ start: { x: number; y: number }, end: { x: number; y: number } } | null>(null);
+  const [activeTool, setActiveTool] = useState<'select' | 'draw' | 'hole'>('select');
   const [snapToGrid, setSnapToGrid] = useState(true);
   const [gridVisible, setGridVisible] = useState(true);
   const [history, setHistory] = useState<{ walls: Wall[], holes: Hole[] }[]>([]);
@@ -76,44 +73,11 @@ export default function App() {
 
   const [debugInfo, setDebugInfo] = useState({ width: 0, height: 0, ready: false, frames: 0 });
 
-  // Math helper for Curved Wall Geometry
-  const createCurvedGeometry = (wall: Wall) => {
-    if (!wall.control) return new THREE.BoxGeometry(0,0,0);
-    
-    const curve = new THREE.QuadraticBezierCurve(
-      new THREE.Vector2(wall.start.x, wall.start.y),
-      new THREE.Vector2(wall.control.x, wall.control.y),
-      new THREE.Vector2(wall.end.x, wall.end.y)
-    );
-
-    const points = curve.getPoints(32);
-    const shape = new THREE.Shape();
-    const leftPoints: THREE.Vector2[] = [];
-    const rightPoints: THREE.Vector2[] = [];
-
-    points.forEach((pt, i) => {
-      const t = i / 32;
-      const tangent = curve.getTangent(t);
-      const normal = new THREE.Vector2(-tangent.y, tangent.x).normalize();
-      leftPoints.push(pt.clone().add(normal.clone().multiplyScalar(WALL_THICKNESS / 2)));
-      rightPoints.push(pt.clone().sub(normal.clone().multiplyScalar(WALL_THICKNESS / 2)));
-    });
-
-    shape.moveTo(leftPoints[0].x, leftPoints[0].y);
-    leftPoints.forEach(p => shape.lineTo(p.x, p.y));
-    for (let i = rightPoints.length - 1; i >= 0; i--) shape.lineTo(rightPoints[i].x, rightPoints[i].y);
-    shape.closePath();
-
-    const geometry = new THREE.ExtrudeGeometry(shape, { depth: WALL_HEIGHT, bevelEnabled: false });
-    geometry.rotateX(-Math.PI / 2);
-    return geometry;
-  };
-
   // Handle OrbitControls configuration based on active tool
   useEffect(() => {
     if (!controlsRef.current) return;
     
-    if (activeTool !== 'select') {
+    if (activeTool === 'draw' || activeTool === 'hole') {
       controlsRef.current.mouseButtons = {
         LEFT: null,
         MIDDLE: THREE.MOUSE.PAN,
@@ -284,38 +248,37 @@ export default function App() {
     const selectedWallMaterial = new THREE.MeshStandardMaterial({ color: 0x10b981, emissive: 0x10b981, emissiveIntensity: 0.2 });
     const holeMaterial = new THREE.MeshStandardMaterial({ color: 0xef4444, transparent: true, opacity: 0.8 });
 
-    const renderWall = (wall: Wall, isPreview = false) => {
+    walls.forEach(wall => {
+      const dx = wall.end.x - wall.start.x;
+      const dz = wall.end.y - wall.start.y;
+      const length = Math.sqrt(dx * dx + dz * dz);
+      if (length < 0.1) return;
+
       const isSelected = wall.id === selectedWallId;
       const isHovered = wall.id === hoveredId;
-      const material = isPreview 
-        ? new THREE.MeshStandardMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.5 }) 
-        : (isSelected ? selectedWallMaterial : (isHovered ? new THREE.MeshStandardMaterial({ color: 0x60a5fa }) : wallMaterial));
+      const material = isSelected ? selectedWallMaterial : (isHovered ? new THREE.MeshStandardMaterial({ color: 0x60a5fa }) : wallMaterial);
 
-      let mesh: THREE.Mesh;
-      if (wall.control) {
-        mesh = new THREE.Mesh(createCurvedGeometry(wall), material);
-      } else {
-        const dx = wall.end.x - wall.start.x;
-        const dz = wall.end.y - wall.start.y;
-        const length = Math.sqrt(dx * dx + dz * dz);
-        if (length < 0.1) return;
-        const geometry = new THREE.BoxGeometry(length, WALL_HEIGHT, WALL_THICKNESS);
-        mesh = new THREE.Mesh(geometry, material);
-        mesh.rotation.y = -Math.atan2(dz, dx);
-        mesh.position.set((wall.start.x + wall.end.x) / 2, WALL_HEIGHT / 2, (wall.start.y + wall.end.y) / 2);
-      }
+      const geometry = new THREE.BoxGeometry(length, WALL_HEIGHT, WALL_THICKNESS);
+      const mesh = new THREE.Mesh(geometry, material);
+      const angle = Math.atan2(dz, dx);
+      mesh.rotation.y = -angle;
+      mesh.position.set(
+        (wall.start.x + wall.end.x) / 2,
+        WALL_HEIGHT / 2,
+        (wall.start.y + wall.end.y) / 2
+      );
       wallsGroupRef.current?.add(mesh);
 
       const pillarGeom = new THREE.CylinderGeometry(WALL_THICKNESS / 2, WALL_THICKNESS / 2, WALL_HEIGHT, 16);
-      [wall.start, wall.end].forEach(p => {
-        const pillar = new THREE.Mesh(pillarGeom, material);
-        pillar.position.set(p.x, WALL_HEIGHT / 2, p.y);
-        wallsGroupRef.current?.add(pillar);
-      });
-    };
+      
+      const startPillar = new THREE.Mesh(pillarGeom, material);
+      startPillar.position.set(wall.start.x, WALL_HEIGHT / 2, wall.start.y);
+      wallsGroupRef.current?.add(startPillar);
 
-    walls.forEach(w => renderWall(w));
-    if (currentWall) renderWall(currentWall, true);
+      const endPillar = new THREE.Mesh(pillarGeom, material);
+      endPillar.position.set(wall.end.x, WALL_HEIGHT / 2, wall.end.y);
+      wallsGroupRef.current?.add(endPillar);
+    });
 
     holes.forEach(hole => {
       const geometry = new THREE.CylinderGeometry(2.25, 2.25, 20, 32);
@@ -329,6 +292,33 @@ export default function App() {
       holesGroupRef.current?.add(mesh);
     });
 
+    if (currentWall) {
+      const dx = currentWall.end.x - currentWall.start.x;
+      const dz = currentWall.end.y - currentWall.start.y;
+      const length = Math.sqrt(dx * dx + dz * dz);
+      if (length > 0.1) {
+        const previewMat = new THREE.MeshStandardMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.5 });
+        
+        const geometry = new THREE.BoxGeometry(length, WALL_HEIGHT, WALL_THICKNESS);
+        const mesh = new THREE.Mesh(geometry, previewMat);
+        const angle = Math.atan2(dz, dx);
+        mesh.rotation.y = -angle;
+        mesh.position.set(
+          (currentWall.start.x + currentWall.end.x) / 2,
+          WALL_HEIGHT / 2,
+          (currentWall.start.y + currentWall.end.y) / 2
+        );
+        wallsGroupRef.current?.add(mesh);
+
+        const pillarGeom = new THREE.CylinderGeometry(WALL_THICKNESS / 2, WALL_THICKNESS / 2, WALL_HEIGHT, 16);
+        const startPillar = new THREE.Mesh(pillarGeom, previewMat);
+        startPillar.position.set(currentWall.start.x, WALL_HEIGHT / 2, currentWall.start.y);
+        wallsGroupRef.current?.add(startPillar);
+        const endPillar = new THREE.Mesh(pillarGeom, previewMat);
+        endPillar.position.set(currentWall.end.x, WALL_HEIGHT / 2, currentWall.end.y);
+        wallsGroupRef.current?.add(endPillar);
+      }
+    }
   }, [walls, holes, currentWall, selectedHoleId, selectedWallId, hoveredId]);
 
   // Drawing Logic
@@ -374,13 +364,6 @@ export default function App() {
   }, [snapToGrid, baseMesh]);
 
   const getDistanceToWall = (p: { x: number, y: number }, wall: Wall) => {
-    if (wall.control) {
-        // Curve distance is complex, use simple start/end proximity for now
-        const d1 = Math.sqrt((p.x - wall.start.x) ** 2 + (p.y - wall.start.y) ** 2);
-        const d2 = Math.sqrt((p.x - wall.end.x) ** 2 + (p.y - wall.end.y) ** 2);
-        const d3 = Math.sqrt((p.x - wall.control.x) ** 2 + (p.y - wall.control.y) ** 2);
-        return Math.min(d1, d2, d3);
-    }
     const { start, end } = wall;
     const l2 = (start.x - end.x) ** 2 + (start.y - end.y) ** 2;
     if (l2 === 0) return Math.sqrt((p.x - start.x) ** 2 + (p.y - start.y) ** 2);
@@ -396,22 +379,8 @@ export default function App() {
 
     if (activeTool === 'draw') {
       setIsDrawing(true);
-      setCurrentWall({ id: crypto.randomUUID(), start: point, end: point });
+      setCurrentWall({ start: point, end: point });
       if (controlsRef.current) controlsRef.current.enabled = false;
-    } else if (activeTool === 'curve') {
-        if (curveStep === 0) {
-            setCurrentWall({ id: crypto.randomUUID(), start: point, end: point, control: point });
-            setCurveStep(1);
-            if (controlsRef.current) controlsRef.current.enabled = false;
-        } else if (curveStep === 1) {
-            setCurveStep(2);
-        } else {
-            saveToHistory();
-            if (currentWall) setWalls(prev => [...prev, currentWall]);
-            setCurrentWall(null);
-            setCurveStep(0);
-            if (controlsRef.current) controlsRef.current.enabled = true;
-        }
     } else if (activeTool === 'hole') {
       saveToHistory();
       setHoles(prev => [...prev, { id: crypto.randomUUID(), x: point.x, y: point.y }]);
@@ -440,6 +409,7 @@ export default function App() {
         return;
       }
 
+      // If we clicked on empty space, deselect everything
       setSelectedHoleId(null);
       setSelectedWallId(null);
     }
@@ -452,14 +422,8 @@ export default function App() {
       return;
     }
 
-    if (activeTool === 'draw' && isDrawing && currentWall) {
-      setCurrentWall({ ...currentWall, end: point });
-    } else if (activeTool === 'curve' && currentWall) {
-        if (curveStep === 1) {
-            setCurrentWall({ ...currentWall, end: point, control: { x: (currentWall.start.x + point.x) / 2, y: (currentWall.start.y + point.y) / 2 } });
-        } else if (curveStep === 2) {
-            setCurrentWall({ ...currentWall, control: point });
-        }
+    if (isDrawing && currentWall) {
+      setCurrentWall(prev => prev ? { ...prev, end: point } : null);
     } else if (selectedHoleId && dragStartPoint) {
       setHoles(prev => prev.map(h => h.id === selectedHoleId ? { ...h, x: point.x, y: point.y } : h));
     } else if (selectedWallId && dragStartPoint) {
@@ -470,8 +434,22 @@ export default function App() {
         if (w.id === selectedWallId) {
           const newStart = { x: w.start.x + dx, y: w.start.y + dy };
           const newEnd = { x: w.end.x + dx, y: w.end.y + dy };
-          const newControl = w.control ? { x: w.control.x + dx, y: w.control.y + dy } : undefined;
-          return { ...w, start: newStart, end: newEnd, control: newControl };
+          
+          if (baseMesh) {
+            const checkRaycaster = new THREE.Raycaster();
+            
+            checkRaycaster.set(new THREE.Vector3(newStart.x, 1000, newStart.y), new THREE.Vector3(0, -1, 0));
+            const startIntersects = checkRaycaster.intersectObject(baseMesh);
+            
+            checkRaycaster.set(new THREE.Vector3(newEnd.x, 1000, newEnd.y), new THREE.Vector3(0, -1, 0));
+            const endIntersects = checkRaycaster.intersectObject(baseMesh);
+            
+            if (startIntersects.length === 0 || endIntersects.length === 0) {
+              return w; 
+            }
+          }
+          
+          return { ...w, start: newStart, end: newEnd };
         }
         return w;
       }));
@@ -492,21 +470,24 @@ export default function App() {
   };
 
   const handleMouseUp = () => {
-    if (activeTool === 'draw' && isDrawing && currentWall) {
+    if (isDrawing && currentWall) {
       const dx = currentWall.end.x - currentWall.start.x;
       const dy = currentWall.end.y - currentWall.start.y;
       const length = Math.sqrt(dx * dx + dy * dy);
       
       if (length > 0.5) {
         saveToHistory();
-        setWalls(prev => [...prev, currentWall]);
+        setWalls(prev => [...prev, { id: crypto.randomUUID(), ...currentWall }]);
       }
       
       setIsDrawing(false);
       setCurrentWall(null);
-      if (controlsRef.current) controlsRef.current.enabled = true;
     }
+
+    // Only stop dragging; do NOT clear the selection IDs here so you can delete them!
     setDragStartPoint(null);
+
+    if (controlsRef.current) controlsRef.current.enabled = true;
   };
 
   const clearWalls = () => {
@@ -534,25 +515,49 @@ export default function App() {
   const exportSTL = async () => {
     if (!sceneRef.current) return;
     setIsExporting(true);
+    
+    // Small delay to allow UI to update to "Processing..."
     await new Promise(resolve => setTimeout(resolve, 50));
+
     const exporter = new STLExporter();
 
+    // HELPER: Prepares geometries for merging by stripping out non-indexed issues
     const cleanGeometry = (geom: THREE.BufferGeometry) => {
       let cleaned = geom.clone();
-      if (cleaned.index) cleaned = cleaned.toNonIndexed();
+      
+      if (cleaned.index) {
+        cleaned = cleaned.toNonIndexed();
+      }
+      
       for (const key in cleaned.attributes) {
-        if (key !== 'position' && key !== 'normal') cleaned.deleteAttribute(key);
+        if (key !== 'position' && key !== 'normal') {
+          cleaned.deleteAttribute(key);
+        }
       }
       cleaned.clearGroups();
       return cleaned;
     };
     
     try {
+      console.log('Gathering geometries for export...');
+      
+      // --- 1. GATHER SOLIDS TO MERGE (BASE + WALLS) ---
       const solidGeometries: THREE.BufferGeometry[] = [];
+      
       if (baseMesh) {
         const geom = baseMesh.geometry.clone();
         geom.applyMatrix4(baseMesh.matrixWorld);
         solidGeometries.push(cleanGeometry(geom));
+      } else if (walls.length > 0) {
+        // Fallback flat floor
+        let minX = -50, maxX = 50, minZ = -50, maxZ = 50;
+        walls.forEach(w => {
+          minX = Math.min(minX, w.start.x, w.end.x); maxX = Math.max(maxX, w.start.x, w.end.x);
+          minZ = Math.min(minZ, w.start.y, w.end.y); maxZ = Math.max(maxZ, w.start.y, w.end.y);
+        });
+        const floorGeom = new THREE.BoxGeometry((maxX - minX) + 20, 2, (maxZ - minZ) + 20);
+        floorGeom.translate((minX + maxX) / 2, 1, (minZ + maxZ) / 2);
+        solidGeometries.push(cleanGeometry(floorGeom));
       }
       
       if (wallsGroupRef.current) {
@@ -566,28 +571,51 @@ export default function App() {
         });
       }
 
-      const exportGroup = new THREE.Group();
-      if (solidGeometries.length > 0) {
-        const mergedSolidGeom = mergeGeometries(solidGeometries, false);
-        if (mergedSolidGeom) exportGroup.add(new THREE.Mesh(mergedSolidGeom, new THREE.MeshStandardMaterial()));
+      if (solidGeometries.length === 0 && holes.length === 0) {
+        alert('Nothing to export!');
+        setIsExporting(false);
+        return;
       }
       
+      const exportGroup = new THREE.Group();
+
+      // Instantly merge base plate and walls into ONE single structure
+      if (solidGeometries.length > 0) {
+        const mergedSolidGeom = mergeGeometries(solidGeometries, false);
+        if (!mergedSolidGeom) throw new Error("Failed to merge solid geometries");
+        
+        const finalSolidMesh = new THREE.Mesh(mergedSolidGeom, new THREE.MeshStandardMaterial());
+        exportGroup.add(finalSolidMesh);
+      }
+      
+      // --- 2. ADD HOLES AS SEPARATE SOLIDS (FOR THE SLICER) ---
       if (holes.length > 0) {
         for (let i = 0; i < holes.length; i++) {
           const hole = holes[i];
+          // We make them extra tall so they are easy to grab and ensure they pierce the floor in the slicer
           const holeGeom = new THREE.CylinderGeometry(2.25, 2.25, 200, 32);
           holeGeom.translate(hole.x, 0, hole.y);
-          exportGroup.add(new THREE.Mesh(cleanGeometry(holeGeom), new THREE.MeshStandardMaterial()));
+          
+          const holeMesh = new THREE.Mesh(cleanGeometry(holeGeom), new THREE.MeshStandardMaterial());
+          exportGroup.add(holeMesh);
         }
       }
       
+      // --- 3. EXPORT FINAL MESH ---
       const stlResult = exporter.parse(exportGroup, { binary: true });
+      const stlBlob = new Blob([stlResult], { type: 'application/octet-stream' });
+      const stlUrl = URL.createObjectURL(stlBlob);
+      
       const link = document.createElement('a');
-      link.href = URL.createObjectURL(new Blob([stlResult], { type: 'application/octet-stream' }));
+      link.href = stlUrl;
       link.download = 'maze_architect_export.stl';
       link.click();
+      URL.revokeObjectURL(stlUrl);
+      
+      console.log('Export Complete!');
     } catch (error) {
       console.error('Export Error:', error);
+      alert('Error during export. Check the console for details.');
     } finally {
       setIsExporting(false);
     }
@@ -609,34 +637,73 @@ export default function App() {
         
         <div className="flex items-center gap-4">
           <div className="flex bg-neutral-100 p-1 rounded-xl border border-neutral-200">
-            <button onClick={() => { setActiveTool('select'); setCurveStep(0); }} className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${activeTool === 'select' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500 hover:text-neutral-700'}`}>
-              <MousePointer2 className="w-4 h-4" /> <span className="text-sm font-semibold">Select</span>
+            <button 
+              onClick={() => setActiveTool('select')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${activeTool === 'select' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500 hover:text-neutral-700'}`}
+            >
+              <MousePointer2 className="w-4 h-4" />
+              <span className="text-sm font-semibold">Select</span>
             </button>
-            <button onClick={() => { setActiveTool('draw'); setCurveStep(0); }} className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${activeTool === 'draw' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500 hover:text-neutral-700'}`}>
-              <PenTool className="w-4 h-4" /> <span className="text-sm font-semibold">Walls</span>
+            <button 
+              onClick={() => {
+                setActiveTool('draw');
+                if (cameraRef.current && controlsRef.current) {
+                  cameraRef.current.position.set(0, 150, 0);
+                  controlsRef.current.target.set(0, 0, 0);
+                  controlsRef.current.update();
+                }
+              }}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${activeTool === 'draw' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500 hover:text-neutral-700'}`}
+            >
+              <PenTool className="w-4 h-4" />
+              <span className="text-sm font-semibold">Walls</span>
             </button>
-            <button onClick={() => { setActiveTool('curve'); setCurveStep(0); }} className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${activeTool === 'curve' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500 hover:text-neutral-700'}`}>
-              <Spline className="w-4 h-4" /> <span className="text-sm font-semibold">Curves</span>
-            </button>
-            <button onClick={() => { setActiveTool('hole'); setCurveStep(0); }} className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${activeTool === 'hole' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500 hover:text-neutral-700'}`}>
-              <Circle className="w-4 h-4" /> <span className="text-sm font-semibold">Hole</span>
+            <button 
+              onClick={() => {
+                setActiveTool('hole');
+                if (cameraRef.current && controlsRef.current) {
+                  cameraRef.current.position.set(0, 150, 0);
+                  controlsRef.current.target.set(0, 0, 0);
+                  controlsRef.current.update();
+                }
+              }}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all ${activeTool === 'hole' ? 'bg-white shadow-sm text-blue-600' : 'text-neutral-500 hover:text-neutral-700'}`}
+            >
+              <Circle className="w-4 h-4" />
+              <span className="text-sm font-semibold">Hole</span>
             </button>
           </div>
 
-          <button onClick={undo} disabled={history.length === 0} className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all border ${history.length > 0 ? 'bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-50 shadow-sm' : 'bg-neutral-50 border-neutral-100 text-neutral-300 cursor-not-allowed'}`}>
-            <Undo2 className="w-4 h-4" /> <span className="text-sm font-semibold">Undo</span>
+          <button 
+            onClick={undo}
+            disabled={history.length === 0}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all border ${history.length > 0 ? 'bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-50 shadow-sm' : 'bg-neutral-50 border-neutral-100 text-neutral-300 cursor-not-allowed'}`}
+            title="Undo (Ctrl+Z)"
+          >
+            <Undo2 className="w-4 h-4" />
+            <span className="text-sm font-semibold">Undo</span>
           </button>
           
-          <button onClick={exportSTL} disabled={isExporting} className="flex items-center gap-2 px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-xl font-bold transition-all shadow-md active:scale-95">
-            {isExporting ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Download className="w-4 h-4" />}
+          <button 
+            onClick={exportSTL}
+            disabled={isExporting}
+            className="flex items-center gap-2 px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-xl font-bold transition-all shadow-md active:scale-95"
+          >
+            {isExporting ? (
+              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
             <span>{isExporting ? 'Processing...' : 'Export STL'}</span>
           </button>
         </div>
       </header>
 
       <main className="flex flex-1 relative overflow-hidden">
+        {/* Sidebar */}
         <aside className="w-72 bg-white border-r border-neutral-200 flex flex-col z-20 shadow-xl">
           <div className="p-6 space-y-8 overflow-y-auto">
+            {/* Wall Settings */}
             <section className="space-y-4">
               <h2 className="text-[10px] font-black text-neutral-400 uppercase tracking-widest">Wall Specs</h2>
               <div className="grid grid-cols-2 gap-3">
@@ -651,13 +718,16 @@ export default function App() {
               </div>
             </section>
 
+            {/* Editor Settings */}
             <section className="space-y-4">
               <h2 className="text-[10px] font-black text-neutral-400 uppercase tracking-widest">Editor</h2>
+              
               {activeTool === 'select' && (
                 <div className="p-4 bg-blue-50 border border-blue-100 rounded-2xl flex gap-3 animate-in fade-in slide-in-from-top-2 duration-300">
                   <Info className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
                   <p className="text-[11px] leading-relaxed text-blue-700 font-medium">
-                    <strong className="block mb-0.5">Select Mode</strong> Click and drag walls or holes to move them.
+                    <strong className="block mb-0.5">Select Mode</strong>
+                    Click and drag walls or holes to move them. Use Delete/Backspace to remove selected items.
                   </p>
                 </div>
               )}
@@ -665,26 +735,54 @@ export default function App() {
               <div className="space-y-2">
                 <label className="flex items-center justify-between p-4 bg-neutral-50 rounded-2xl border border-neutral-100 cursor-pointer hover:bg-neutral-100 transition-all">
                   <span className="text-xs font-bold text-neutral-600">Snap to Grid</span>
-                  <input type="checkbox" checked={snapToGrid} onChange={(e) => setSnapToGrid(e.target.checked)} className="w-4 h-4 text-blue-600 rounded-full focus:ring-blue-500" />
+                  <input 
+                    type="checkbox" 
+                    checked={snapToGrid} 
+                    onChange={(e) => setSnapToGrid(e.target.checked)}
+                    className="w-4 h-4 text-blue-600 rounded-full focus:ring-blue-500"
+                  />
                 </label>
                 <label className="flex items-center justify-between p-4 bg-neutral-50 rounded-2xl border border-neutral-100 cursor-pointer hover:bg-neutral-100 transition-all">
                   <span className="text-xs font-bold text-neutral-600">Show Grid</span>
-                  <input type="checkbox" checked={gridVisible} onChange={(e) => { setGridVisible(e.target.checked); if (gridHelperRef.current) gridHelperRef.current.visible = e.target.checked; }} className="w-4 h-4 text-blue-600 rounded-full focus:ring-blue-500" />
+                  <input 
+                    type="checkbox" 
+                    checked={gridVisible} 
+                    onChange={(e) => {
+                      setGridVisible(e.target.checked);
+                      if (gridHelperRef.current) gridHelperRef.current.visible = e.target.checked;
+                    }}
+                    className="w-4 h-4 text-blue-600 rounded-full focus:ring-blue-500"
+                  />
                 </label>
               </div>
               
               {showClearConfirm ? (
                 <div className="flex gap-2">
-                  <button onClick={clearWalls} className="flex-1 p-4 bg-red-600 text-white rounded-2xl font-bold text-xs active:scale-95 transition-transform">Confirm Clear</button>
-                  <button onClick={() => setShowClearConfirm(false)} className="p-4 bg-neutral-200 text-neutral-600 rounded-2xl font-bold text-xs active:scale-95 transition-transform">Cancel</button>
+                  <button 
+                    onClick={clearWalls}
+                    className="flex-1 p-4 bg-red-600 text-white rounded-2xl font-bold text-xs active:scale-95 transition-transform"
+                  >
+                    Confirm Clear
+                  </button>
+                  <button 
+                    onClick={() => setShowClearConfirm(false)}
+                    className="p-4 bg-neutral-200 text-neutral-600 rounded-2xl font-bold text-xs active:scale-95 transition-transform"
+                  >
+                    Cancel
+                  </button>
                 </div>
               ) : (
-                <button onClick={() => setShowClearConfirm(true)} className="w-full flex items-center justify-center gap-2 p-4 bg-red-50 hover:bg-red-100 text-red-600 rounded-2xl border border-red-100 transition-all font-bold text-xs active:scale-95">
-                  <Trash2 className="w-4 h-4" /> <span>Clear All</span>
+                <button 
+                  onClick={() => setShowClearConfirm(true)}
+                  className="w-full flex items-center justify-center gap-2 p-4 bg-red-50 hover:bg-red-100 text-red-600 rounded-2xl border border-red-100 transition-all font-bold text-xs active:scale-95"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Clear All</span>
                 </button>
               )}
             </section>
 
+            {/* Stats */}
             <section className="pt-6 border-t border-neutral-100">
               <div className="flex flex-col gap-2">
                 <div className="flex items-center justify-between">
@@ -697,9 +795,14 @@ export default function App() {
                     <span className="text-xs font-bold text-neutral-400">Holes: <span className="text-neutral-900">{holes.length}</span></span>
                   </div>
                 </div>
-                {(selectedHoleId || selectedWallId) && (
-                  <button onClick={deleteSelected} className="w-full flex items-center justify-center gap-2 p-3 bg-red-50 text-red-600 rounded-xl border border-red-100 font-bold text-xs hover:bg-red-100 transition-all mt-2 active:scale-95">
-                    <Trash2 className="w-4 h-4" /> Delete Selected {selectedHoleId ? 'Hole' : 'Wall'}
+                
+                { (selectedHoleId || selectedWallId) && (
+                  <button 
+                    onClick={deleteSelected}
+                    className="w-full flex items-center justify-center gap-2 p-3 bg-red-50 text-red-600 rounded-xl border border-red-100 font-bold text-xs hover:bg-red-100 transition-all mt-2 active:scale-95"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Delete Selected {selectedHoleId ? 'Hole' : 'Wall'}
                   </button>
                 )}
               </div>
@@ -707,7 +810,8 @@ export default function App() {
           </div>
         </aside>
 
-        <div className="flex-1 relative bg-[#f8f9fa] overflow-hidden">
+        {/* 3D Viewport */}
+        <div className="flex-1 relative bg-[#f8f9fa] border-2 border-red-500 overflow-hidden">
           <div 
             ref={containerRef} 
             className="absolute inset-0"
@@ -718,30 +822,54 @@ export default function App() {
             onMouseLeave={handleMouseUp}
           />
           
+          {/* Debug Overlay */}
           <div className="absolute top-4 right-4 bg-black/80 text-white p-2 rounded text-xs font-mono z-50 pointer-events-none">
-            Viewport: {debugInfo.width}x{debugInfo.height} | F: {debugInfo.frames}
+            Viewport: {debugInfo.width}x{debugInfo.height} {debugInfo.ready ? '(Ready)' : '(Wait)'} | F: {debugInfo.frames} | T: {new Date().toLocaleTimeString()}
           </div>
-
+          {/* View Controls */}
           <div className="absolute top-6 right-6 flex flex-col gap-2 z-10">
              <div className="bg-white/80 backdrop-blur-md p-2 rounded-2xl border border-neutral-200 shadow-xl flex flex-col gap-1">
-                <button onClick={() => { if (cameraRef.current && controlsRef.current) { cameraRef.current.position.set(0, 150, 0); controlsRef.current.target.set(0, 0, 0); controlsRef.current.update(); }}} className="p-3 hover:bg-blue-50 hover:text-blue-600 rounded-xl text-neutral-500 transition-all" title="Top View"><Layers className="w-5 h-5" /></button>
-                <button onClick={() => { if (cameraRef.current && controlsRef.current) { cameraRef.current.position.set(100, 100, 100); controlsRef.current.target.set(0, 0, 0); controlsRef.current.update(); }}} className="p-3 hover:bg-blue-50 hover:text-blue-600 rounded-xl text-neutral-500 transition-all" title="Perspective View"><Box className="w-5 h-5" /></button>
+                <button 
+                  onClick={() => {
+                    if (cameraRef.current && controlsRef.current) {
+                      cameraRef.current.position.set(0, 150, 0);
+                      controlsRef.current.target.set(0, 0, 0);
+                      controlsRef.current.update();
+                    }
+                  }}
+                  className="p-3 hover:bg-blue-50 hover:text-blue-600 rounded-xl text-neutral-500 transition-all"
+                  title="Top View"
+                >
+                  <Layers className="w-5 h-5" />
+                </button>
+                <button 
+                  onClick={() => {
+                    if (cameraRef.current && controlsRef.current) {
+                      cameraRef.current.position.set(100, 100, 100);
+                      controlsRef.current.target.set(0, 0, 0);
+                      controlsRef.current.update();
+                    }
+                  }}
+                  className="p-3 hover:bg-blue-50 hover:text-blue-600 rounded-xl text-neutral-500 transition-all"
+                  title="Perspective View"
+                >
+                  <Box className="w-5 h-5" />
+                </button>
              </div>
           </div>
 
+          {/* Active Tool Label */}
           <AnimatePresence>
-            {(activeTool !== 'select') && (
+            {(activeTool === 'draw' || activeTool === 'hole') && (
               <motion.div 
                 initial={{ opacity: 0, scale: 0.9, y: 20 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.9, y: 20 }}
                 className="absolute bottom-10 left-1/2 -translate-x-1/2 bg-blue-600 text-white px-8 py-4 rounded-2xl shadow-2xl flex items-center gap-4 pointer-events-none z-10"
               >
-                {activeTool === 'draw' ? <PenTool className="w-5 h-5" /> : (activeTool === 'curve' ? <Spline className="w-5 h-5" /> : <Circle className="w-5 h-5" />)}
+                {activeTool === 'draw' ? <PenTool className="w-5 h-5" /> : <Circle className="w-5 h-5" />}
                 <span className="text-sm font-black uppercase tracking-widest">
-                  {activeTool === 'draw' && 'Wall Drawing Active'}
-                  {activeTool === 'hole' && 'Hole Placement Active'}
-                  {activeTool === 'curve' && (curveStep === 0 ? 'Click to Start Curve' : (curveStep === 1 ? 'Set End Point' : 'Adjust Curvature'))}
+                  {activeTool === 'draw' ? 'Wall Drawing Active' : 'Hole Placement Active'}
                 </span>
                 <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
               </motion.div>
